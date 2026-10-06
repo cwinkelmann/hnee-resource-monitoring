@@ -1,0 +1,20 @@
+# Who may use which GPUs. Keys are OS usernames exactly as /proc reports them.
+# Agreed 2026-08-19: dorian 0-3, cwinkelmann 4-7.
+[assignments]
+"dorian.zwanzig" = [0, 1, 2, 3]
+"cwinkelmann"    = [4, 5, 6, 7]
+
+[rules]
+# A process holding at least idle_min_mib while the GPU sits below idle_util_pct
+# for idle_grace_s is "parked" -- the forgotten-notebook case.
+idle_util_pct   = 5
+idle_min_mib    = 1024
+idle_grace_s    = 1800      # 30 min: long enough not to flag a job between epochs
+
+# Capacity alarm: fires when NO GPU has this much free. 40 GiB is the floor for
+# starting a real training run on an 80 GB card.
+capacity_free_mib = 40960
+
+[notify]
+cooldown_s = 3600           # one message per incident per hour, not per poll
+channel    = "#gpu-watch"

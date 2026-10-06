@@ -1,0 +1,23 @@
+# deploy/resourcemonitor.service  ->  ~/.config/systemd/user/
+[Unit]
+Description=GPU resource monitor (read-only; posts to Slack)
+After=network-online.target
+
+[Service]
+Type=simple
+# Linger=yes is already set for this user, so the service survives logout.
+Environment=PYTHONUNBUFFERED=1
+# mode 0600; holds SLACK_WEBHOOK_URL
+EnvironmentFile=%h/.config/resourcemonitor/env
+ExecStart=/usr/bin/python3 -m resourcemonitor watch --interval 60 --post
+WorkingDirectory=%h/ResourceMonitor
+Restart=always
+RestartSec=30
+# Deliberately NOT set: ProtectSystem, ProtectHome, PrivateTmp. In a user unit they
+# imply PrivateUsers=yes, a user namespace that rewrites every foreign UID in /proc
+# to 65534, which destroys the per-user attribution this tool exists for (and
+# ProtectHome=read-only would make the state directory unwritable).
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
