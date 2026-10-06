@@ -40,6 +40,8 @@ _QUERY_SLOTS = threading.BoundedSemaphore(2)
 _BUSY_WAIT_S = 2
 
 MAX_BODY = 4096
+_DRAIN_MAX = 64 * 1024                          # unread body bytes swallowed before a rejection
+_DRAIN_TIMEOUT_S = 1
 _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
                                  "/api/timeline", "/api/users", "/healthz"}
@@ -125,8 +127,12 @@ def _is_int(v) -> bool:
 
 
 def _is_gib(v) -> bool:
-    return (isinstance(v, (int, float)) and not isinstance(v, bool)
-            and math.isfinite(v) and v > 0 and math.isfinite(v * MIB_PER_GIB))
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v) and v > 0 and math.isfinite(v * MIB_PER_GIB)
+    except OverflowError:                       # an int too large to convert to float
+        return False
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -201,10 +207,12 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         if path in _GET_ONLY:
+            self._drain()
             self._method_not_allowed()
             return
         m = _CANCEL.match(path)
         if path != "/api/claims" and m is None:
+            self._drain()
             self._json(404, {"error": "not found"})
             return
         try:
@@ -219,13 +227,37 @@ class _Handler(BaseHTTPRequestHandler):
                                              now=self.server.clock())
                 self._json(200, {"claim": claim.to_json()})
         except _Reject as e:
-            self.close_connection = True
+            self._drain()
             self._json(e.status, e.body)
         except ClaimError as e:
             self._json(e.status, {"error": _CLAIM_ERRORS[e.status], "detail": e.detail})
         except Exception as e:
             print(f"request failed: {e.__class__.__name__}", flush=True)
             self._json(500, {"error": "internal"})
+
+    def _drain(self) -> None:
+        """Swallow up to 64 KiB of an unread body (1 s at most), then close after replying.
+        Closing a socket with unread input sends a TCP reset, which can make the client
+        lose the response it was about to read."""
+        self.close_connection = True
+        length = self.headers.get("Content-Length", "")
+        if not (length.isascii() and length.isdigit()) or len(length) > 12:
+            return
+        remaining = min(int(length), _DRAIN_MAX)
+        try:
+            self.connection.settimeout(_DRAIN_TIMEOUT_S)
+            while remaining > 0:
+                chunk = self.rfile.read1(remaining)
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                pass
 
     def _write_body(self) -> dict:
         """Apply the drive-by protections in order, then read and parse the JSON body."""

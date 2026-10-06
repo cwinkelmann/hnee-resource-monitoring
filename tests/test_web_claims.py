@@ -107,6 +107,7 @@ def test_bad_bookings_get_a_specific_400(live, payload, status, detail):
     (_booking(vram_gib=0), "missing or invalid field 'vram_gib'"),
     (_booking(vram_gib="40"), "missing or invalid field 'vram_gib'"),
     (_booking(vram_gib=1e308), "missing or invalid field 'vram_gib'"),
+    (_booking(vram_gib=10**309), "missing or invalid field 'vram_gib'"),
     (_booking(end=None), "missing or invalid field 'end'"),
     (_booking(note=5), "missing or invalid field 'note'"),
     (_booking(gpu=9), "GPU must be 0–7"),
@@ -154,6 +155,44 @@ def test_foreign_origin_is_403(live):
 def test_oversize_body_is_413(live):
     s, _, body = _post(live + "/api/claims", None, raw=b" " * 5000)
     assert (s, json.loads(body)) == (413, {"error": "too large"})
+
+
+def _raw_post(base, body, ctype="application/json", origin=None, length=None, delay=0.0):
+    """Send a POST over a bare socket and read the whole response; a reset raises."""
+    import socket
+    import time
+    from urllib.parse import urlsplit
+    u = urlsplit(base)
+    s = socket.create_connection((u.hostname, u.port), timeout=5)
+    try:
+        h = (f"POST /api/claims HTTP/1.1\r\nHost: {u.netloc}\r\nContent-Type: {ctype}\r\n"
+             f"Content-Length: {len(body) if length is None else length}\r\n")
+        if origin:
+            h += f"Origin: {origin}\r\n"
+        s.sendall((h + "\r\n").encode())
+        if delay:
+            time.sleep(delay)
+        s.sendall(body)
+        time.sleep(0.2)                         # let the server reply and close first
+        out = b""
+        while chunk := s.recv(65536):
+            out += chunk
+        return out
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("kw, status", [
+    ({"body": b" " * 5000, "ctype": "text/plain"}, 415),
+    ({"body": b" " * 5000, "ctype": "text/plain", "delay": 0.1}, 415),
+    ({"body": b" " * 5000, "origin": "http://evil.example"}, 403),
+    ({"body": b" " * 50000, "origin": "http://evil.example"}, 403),
+    ({"body": b" " * 60000}, 413),
+], ids=["415", "415-late-body", "403", "403-50k", "413-60k"])
+def test_rejected_writes_reply_without_a_connection_reset(live, kw, status):
+    out = _raw_post(live, **kw)                 # a ConnectionResetError here fails the test
+    head, _, body = out.partition(b"\r\n\r\n")
+    assert head.split(b" ")[1] == str(status).encode() and body.endswith(b"}")
 
 
 def test_missing_content_length_is_413(live):
