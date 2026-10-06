@@ -26,7 +26,7 @@ DEFAULT_HISTORY = Path.home() / ".local/state/resourcemonitor/history.sqlite"
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="resourcemonitor")
-    p.add_argument("mode", choices=["once", "watch", "report"])
+    p.add_argument("mode", choices=["once", "watch", "report", "serve"])
     p.add_argument("--post", action="store_true",
                    help="actually post to Slack (default: print the payload only)")
     p.add_argument("--interval", type=int, default=60, help="seconds between polls")
@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="EUR per kWh, used only to annotate the report")
     p.add_argument("--history", type=Path, default=DEFAULT_HISTORY,
                    help="SQLite history file (watch only)")
+    p.add_argument("--bind", default="127.0.0.1", help="serve: address to listen on")
+    p.add_argument("--port", type=int, default=8765, help="serve: TCP port")
+    p.add_argument("--stale-after", type=int, default=180,
+                   help="serve: seconds without a poll before the page shows 'stale'")
     p.add_argument("--no-history", action="store_true", help="do not record history")
     p.add_argument("--retention-days", type=int, default=90,
                    help="history older than this is pruned")
@@ -66,6 +70,17 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.mode == "serve":         # read-only: no policy/state/notifier/ledger setup
+        from resourcemonitor.web import make_server
+        srv = make_server(args.bind, args.port, args.history, args.policy,
+                          stale_after_s=args.stale_after)
+        try:
+            srv.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            srv.server_close()
+        return 0
     pol = load_policy(args.policy)
     state = State.load(args.state)
     url = os.environ.get("SLACK_WEBHOOK_URL", "")
