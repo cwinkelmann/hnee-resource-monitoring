@@ -128,3 +128,14 @@ unit serves them:
 ```bash
 ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'systemctl --user restart resourcemonitor-soak resourcemonitor-web'
 ```
+
+The v1 -> v2 schema migration of `claims.sqlite` (adds the `kind` column; existing rows become
+`calendar`) happens automatically when the web process first opens the file for a booking
+write. There is no manual step; back up the file before the first restart if you want a copy.
+
+Pre-check before deploying: quick bookings ("holder" dropdown, until 09:00 Europe/Berlin) need
+the IANA time-zone database. Without system tzdata the `/api/claims/quick` route answers 500:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 '~/miniconda3/envs/resourcemonitor/bin/python -c "import zoneinfo; zoneinfo.ZoneInfo(\"Europe/Berlin\")"'
+```

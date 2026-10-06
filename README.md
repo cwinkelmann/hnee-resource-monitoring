@@ -96,19 +96,24 @@ books the whole card.
 **Quick booking.** Each GPU card in *Now* has a `holder` dropdown. Picking a name books the whole
 card for that user from now until the next **09:00** (Europe/Berlin), so every morning the
 cards are free again; picking `— free —` releases it. The dropdown only works on a card with no
-active calendar booking (then it shows "partly booked — use the calendar"), and a quick booking
+active calendar booking (then it shows "booked — use the calendar", or "partly booked — use
+the calendar" when the bookings leave part of the card unbooked), and a quick booking
 ends early where a calendar booking on that GPU begins. It never cancels a calendar booking.
 
 This is an **honour system**. The dashboard is unauthenticated, so anyone on the LAN can book
-or cancel in any name; every change is shown with its time and IP address.
+or cancel in any name; every change is shown with its time and IP address. Anyone who can
+reach the page can book or cancel, including through other host names or addresses that point
+at the server.
 
 Bookings are reported and **never enforced**: no process is ever signalled, limited or
 reprioritised. The monitor only compares each user's real VRAM use on a card with what they
 booked and alerts on a mismatch:
 
 - Use above **110 %** of the booked VRAM raises an alert (exactly 110 % does not).
-- Memory used without any booking is reported as unbooked use.
-- The unbooked remainder of a card is free for anyone to use.
+- Using a card someone booked, beyond its unbooked remainder, raises an alert; unbooked cards
+  and unbooked VRAM are free for anyone.
+- A quick hold (holder dropdown) blocks calendar bookings on that card until 09:00 unless its
+  holder is set back to free.
 
 Bookings live in `~/.local/state/resourcemonitor/claims.sqlite`, written only by the web
 process. If that file is missing or broken, monitoring carries on as if nothing were booked.
