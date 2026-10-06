@@ -136,3 +136,60 @@ def test_label_falls_back_to_the_nvidia_process_name():
 
 def test_label_is_capped_at_60_chars():
     assert len(label_for("x" * 200, None)) == 60
+
+
+def _py(*args):
+    return label_for("python", ["python", *args])
+
+
+def test_dash_m_after_the_script_is_a_script_argument_not_a_module():
+    assert _py("train.py", "-m", "SECRET") == "python train.py"
+
+
+def test_dash_m_without_a_module_or_with_an_option_as_module_is_plain_python():
+    assert _py("-m") == "python"
+    label = _py("-m", "--token", "SECRET")
+    assert label == "python" and "SECRET" not in label
+
+
+def test_module_must_look_like_a_dotted_identifier():
+    assert _py("-m", "a/b;rm") == "python"
+    assert _py("-m", "pkg.mod") == "python -m pkg.mod"
+
+
+def test_dash_c_code_is_never_shown():
+    assert _py("-c", "x='a.py'") == "python"
+    assert _py("-u", "-c", "token='abc.py'") == "python"
+
+
+def test_a_py_looking_option_value_is_not_the_script():
+    label = _py("--token", "abc.py", "run.py")
+    assert "abc" not in label
+    assert _py("-X", "dev", "run.py") == "python run.py"
+    assert _py("-W", "ignore", "-u", "run.py") == "python run.py"
+
+
+def test_script_name_must_be_a_plain_py_basename():
+    assert _py("/a/b/we ird;.py") == "python"
+    assert _py("notes.txt", "x.py") == "python"
+
+
+def test_empty_and_nul_only_cmdlines():
+    assert label_for(None, []) is None
+    assert label_for(None, [""]) is None
+    assert label_for("python", []) == "python"
+
+
+def test_rewritten_argv0_does_not_leak_arguments():
+    assert "token" not in (label_for("gunicorn: worker [--token x]", None) or "")
+    assert "token" not in (label_for(None, ["gunicorn: worker [--token x]"]) or "")
+    assert label_for("bad;name", None) is None
+
+
+def test_cmdline_of_nul_only_is_none(monkeypatch, tmp_path):
+    import builtins, io
+    from resourcemonitor import probe as pr
+    real = builtins.open
+    monkeypatch.setattr(builtins, "open",
+                        lambda p, *a, **k: io.BytesIO(b"\0\0") if str(p).startswith("/proc/") else real(p, *a, **k))
+    assert pr.cmdline_of(1) is None

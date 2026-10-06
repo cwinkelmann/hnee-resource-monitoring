@@ -137,6 +137,38 @@ def cmdline_of(pid: int) -> list[str] | None:
 
 _PYTHON = re.compile(r"python(3(\.\d+)?)?")
 _LABEL_MAX = 60
+_MODULE = re.compile(r"[A-Za-z_][\w.]*")
+_SCRIPT = re.compile(r"[\w.-]+\.py")
+_SAFE_TOKEN = re.compile(r"[\w.:/@+-]+")
+_NOARG_FLAGS = re.compile(r"-[BdEIOPqsSuvx]+")      # interpreter flags that take no value
+
+
+def _python_label(args: list[str]) -> str:
+    """Walk interpreter options; only a real -m module or the script basename is shown."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-m":
+            mod = args[i + 1] if i + 1 < len(args) else ""
+            return f"python -m {mod}" if _MODULE.fullmatch(mod) else "python"
+        if a in ("-X", "-W"):
+            i += 2                      # option with a separate value
+        elif _NOARG_FLAGS.fullmatch(a):
+            i += 1
+        elif a.startswith("-"):
+            return "python"             # -c (code), unknown or long options: show nothing
+        else:
+            base = posixpath.basename(a)
+            return f"python {base}" if _SCRIPT.fullmatch(base) else "python"
+    return "python"
+
+
+def _safe_basename(text: str) -> str | None:
+    """First whitespace token only (setproctitle can put arguments after it), basename."""
+    parts = text.split()
+    if not parts or not _SAFE_TOKEN.fullmatch(parts[0]):
+        return None
+    return posixpath.basename(parts[0]) or None
 
 
 def label_for(name: str | None, cmdline: list[str] | None) -> str | None:
@@ -148,16 +180,11 @@ def label_for(name: str | None, cmdline: list[str] | None) -> str | None:
     """
     label: str | None = None
     if cmdline and _PYTHON.fullmatch(posixpath.basename(cmdline[0])):
-        args = cmdline[1:]
-        if "-m" in args and args.index("-m") + 1 < len(args):
-            label = f"python -m {args[args.index('-m') + 1]}"
-        else:
-            script = next((a for a in args if a.endswith(".py")), None)
-            label = f"python {posixpath.basename(script)}" if script else "python"
+        label = _python_label(cmdline[1:])
     elif name:
-        label = posixpath.basename(name) or None
+        label = _safe_basename(name)
     elif cmdline:
-        label = posixpath.basename(cmdline[0]) or None
+        label = _safe_basename(cmdline[0])
     return label[:_LABEL_MAX] if label else None
 
 
