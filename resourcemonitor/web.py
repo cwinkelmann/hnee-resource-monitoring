@@ -4,6 +4,7 @@ Never imports probe or notify: it only reads the history database.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from resourcemonitor.paths import DEFAULT_HISTORY, DEFAULT_POLICY
 from resourcemonitor.policy import load_policy
 from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timeseries, usage
 
@@ -193,3 +195,29 @@ def make_server(bind: str, port: int, history_path: Path, policy_path: Path,
     srv.stale_after_s = stale_after_s
     srv.clock = clock
     return srv
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="resourcemonitor serve",
+                                description="Read-only GPU dashboard over the history file.")
+    p.add_argument("--bind", default="127.0.0.1", help="address to listen on")
+    p.add_argument("--port", type=int, default=8765, help="TCP port")
+    p.add_argument("--history", type=Path, default=DEFAULT_HISTORY,
+                   help="SQLite history file written by `watch` (opened read-only)")
+    p.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
+    p.add_argument("--stale-after", type=int, default=180,
+                   help="seconds without a poll before the page shows 'stale'")
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    srv = make_server(args.bind, args.port, args.history, args.policy,
+                      stale_after_s=args.stale_after)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    return 0

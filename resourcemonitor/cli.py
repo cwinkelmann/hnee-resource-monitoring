@@ -12,16 +12,12 @@ from resourcemonitor.energy import EnergyLedger, format_report
 from resourcemonitor.history import HistoryWriter
 from resourcemonitor.model import Snapshot
 from resourcemonitor.notify import Notifier
+from resourcemonitor.paths import DEFAULT_ENERGY, DEFAULT_HISTORY, DEFAULT_POLICY, DEFAULT_STATE
 from resourcemonitor.policy import load_policy
 from resourcemonitor.probe import probe
 from resourcemonitor.rules import (Alert, IdleTracker, check_allocation, check_capacity,
                                     check_unattributed)
 from resourcemonitor.state import State
-
-DEFAULT_POLICY = Path.home() / ".config/resourcemonitor/policy.toml"
-DEFAULT_STATE = Path.home() / ".local/state/resourcemonitor/state.json"
-DEFAULT_ENERGY = Path.home() / ".local/state/resourcemonitor/energy.json"
-DEFAULT_HISTORY = Path.home() / ".local/state/resourcemonitor/history.sqlite"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,17 +67,13 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if args.mode == "serve":         # read-only: no policy/state/notifier/ledger setup
-        from resourcemonitor.web import make_server
-        srv = make_server(args.bind, args.port, args.history, args.policy,
-                          stale_after_s=args.stale_after)
-        try:
-            srv.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            srv.server_close()
-        return 0
+    if args.mode == "serve":
+        # Kept for help/compat. `python -m resourcemonitor serve` never reaches here: it is
+        # dispatched to web.main before this module (and probe/notify) is imported.
+        from resourcemonitor import web
+        return web.main(["--bind", args.bind, "--port", str(args.port),
+                         "--history", str(args.history), "--policy", str(args.policy),
+                         "--stale-after", str(args.stale_after)])
     pol = load_policy(args.policy)
     state = State.load(args.state)
     url = os.environ.get("SLACK_WEBHOOK_URL", "")

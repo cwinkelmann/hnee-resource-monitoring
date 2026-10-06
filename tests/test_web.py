@@ -125,3 +125,45 @@ def test_web_module_never_imports_probe_or_notify():
     names = {n.module for n in ast.walk(ast.parse(src)) if isinstance(n, ast.ImportFrom)}
     names |= {a.name for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Import) for a in n.names}
     assert not any(m and ("probe" in m or "notify" in m) for m in names)
+
+
+_SERVE_PROBE = """
+import runpy, sys
+sys.argv = ["resourcemonitor", "serve", "--help"]
+try:
+    runpy.run_module("resourcemonitor", run_name="__main__", alter_sys=True)
+except SystemExit:
+    pass
+loaded = sorted(m for m in sys.modules if m in ("resourcemonitor.probe", "resourcemonitor.notify"))
+print("LOADED=" + ",".join(loaded))
+"""
+
+
+def test_python_m_resourcemonitor_serve_never_imports_probe_or_notify():
+    """The real entry path of the deployed unit (`python -m resourcemonitor serve`)."""
+    import subprocess, sys, pathlib
+    root = pathlib.Path(__file__).parent.parent
+    r = subprocess.run([sys.executable, "-c", _SERVE_PROBE], cwd=root,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "--bind" in r.stdout and "--stale-after" in r.stdout   # serve's own help ran
+    assert "LOADED=\n" in r.stdout
+
+
+def test_serve_parser_keeps_the_deployed_flags_and_defaults():
+    from resourcemonitor.web import build_parser
+    a = build_parser().parse_args([])
+    assert (a.bind, a.port, a.stale_after) == ("127.0.0.1", 8765, 180)
+    assert a.history.name == "history.sqlite" and a.policy.name == "policy.toml"
+    a = build_parser().parse_args(["--bind", "10.188.1.1", "--port", "8765"])
+    assert (a.bind, a.port) == ("10.188.1.1", 8765)
+
+
+def test_cli_serve_delegates_to_the_web_entry_point(monkeypatch):
+    from resourcemonitor import cli, web
+    seen = []
+    monkeypatch.setattr(web, "main", lambda argv: seen.append(argv) or 0)
+    assert cli.main(["serve", "--bind", "10.188.1.1", "--port", "9", "--stale-after", "5",
+                     "--history", "/x/h.sqlite", "--policy", "/x/p.toml"]) == 0
+    assert seen == [["--bind", "10.188.1.1", "--port", "9", "--history", "/x/h.sqlite",
+                     "--policy", "/x/p.toml", "--stale-after", "5"]]
