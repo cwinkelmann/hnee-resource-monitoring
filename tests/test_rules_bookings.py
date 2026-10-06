@@ -1,0 +1,94 @@
+from datetime import datetime, timedelta, timezone
+
+from resourcemonitor.claims import Booking
+from resourcemonitor.model import GpuProcess, GpuState, Snapshot
+from resourcemonitor.policy import Policy
+from resourcemonitor.rules import check_bookings, check_unattributed
+
+T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+POL = Policy(assignments={}, idle_util_pct=5, idle_min_mib=1024, idle_grace_s=1800,
+             capacity_free_mib=40960, cooldown_s=3600, channel="#c")
+GIB = 1024
+
+
+def _b(user, gpu=4, gib=40, start=T0 - timedelta(hours=1), hours=6, cancelled=False, id=1):
+    return Booking(id=id, user=user, gpu=gpu, vram_mib=gib * GIB, start=start,
+                   end=start + timedelta(hours=hours), note=None, created_at=start,
+                   created_ip="10.0.0.1",
+                   cancelled_at=start if cancelled else None,
+                   cancelled_ip="10.0.0.2" if cancelled else None)
+
+
+def _snap(procs, t=T0, gpu=4):
+    return Snapshot(t, (GpuState(gpu, 81559, sum(p.used_mib for p in procs), 90),), tuple(procs))
+
+
+def _p(user, mib, pid=1, gpu=4):
+    return GpuProcess(pid, gpu, mib, user)
+
+
+def test_unbooked_gpu_is_free_for_anyone():
+    assert check_bookings(_snap([_p("andre.kliem", 70 * GIB)]), POL, []) == []
+
+
+def test_within_own_share_is_fine_and_110_percent_is_still_fine():
+    b = [_b("dorian.zwanzig", gib=40)]
+    assert check_bookings(_snap([_p("dorian.zwanzig", 44 * GIB)]), POL, b) == []   # exactly 110 %
+
+
+def test_over_own_share_beyond_tolerance_alerts():
+    b = [_b("dorian.zwanzig", gib=40)]
+    (a,) = check_bookings(_snap([_p("dorian.zwanzig", 44 * GIB + 1)]), POL, b)
+    assert (a.kind, a.key, a.user, a.gpu_index) == ("over_booking", "booking:over:dorian.zwanzig:4", "dorian.zwanzig", 4)
+    assert "booked 40.0 GiB" in a.text
+
+
+def test_non_booker_within_the_unbooked_remainder_is_fine():
+    b = [_b("dorian.zwanzig", gib=40)]
+    procs = [_p("dorian.zwanzig", 30 * GIB), _p("andre.kliem", 39 * GIB, pid=2)]
+    assert check_bookings(_snap(procs), POL, b) == []
+
+
+def test_non_bookers_together_beyond_the_remainder_all_alert():
+    b = [_b("dorian.zwanzig", gib=60)]
+    procs = [_p("andre.kliem", 12 * GIB, pid=2), _p("cwinkelmann", 10 * GIB, pid=3)]
+    alerts = check_bookings(_snap(procs), POL, b)
+    assert {(a.kind, a.user) for a in alerts} == {("booked_gpu", "andre.kliem"), ("booked_gpu", "cwinkelmann")}
+    assert all("booked by dorian.zwanzig" in a.text and "unbooked" in a.text for a in alerts)
+
+
+def test_a_user_with_two_processes_is_one_incident_with_summed_vram():
+    b = [_b("dorian.zwanzig", gib=40)]
+    procs = [_p("dorian.zwanzig", 30 * GIB), _p("dorian.zwanzig", 20 * GIB, pid=2)]
+    (a,) = check_bookings(_snap(procs), POL, b)
+    assert a.kind == "over_booking" and "50.0 GiB" in a.text
+
+
+def test_two_bookings_by_one_user_add_up():
+    b = [_b("dorian.zwanzig", gib=20, id=1), _b("dorian.zwanzig", gib=20, id=2)]
+    assert check_bookings(_snap([_p("dorian.zwanzig", 40 * GIB)]), POL, b) == []
+
+
+def test_expired_and_cancelled_bookings_are_ignored():
+    expired = _b("dorian.zwanzig", gib=79, start=T0 - timedelta(hours=5), hours=5)   # ends exactly at T0
+    cancelled = _b("cwinkelmann", gib=79, cancelled=True, id=2)
+    assert check_bookings(_snap([_p("andre.kliem", 70 * GIB)]), POL, [expired, cancelled]) == []
+
+
+def test_alert_stops_at_the_first_poll_after_the_booking_ends():
+    b = [_b("dorian.zwanzig", gib=79, start=T0 - timedelta(hours=1), hours=2)]
+    busy = [_p("andre.kliem", 30 * GIB)]
+    assert check_bookings(_snap(busy, t=T0), POL, b)                                 # booked: alert
+    assert check_bookings(_snap(busy, t=T0 + timedelta(hours=1)), POL, b) == []      # ended: free
+
+
+def test_unattributed_processes_never_trigger_booking_alerts():
+    b = [_b("dorian.zwanzig", gib=79)]
+    assert check_bookings(_snap([GpuProcess(9, 4, 30 * GIB, None)]), POL, b) == []
+
+
+def test_unattributed_rule_fires_on_booked_gpus_only():
+    procs = [GpuProcess(9, 4, 2 * GIB, None)]
+    assert check_unattributed(_snap(procs), POL, []) == []
+    (a,) = check_unattributed(_snap(procs), POL, [_b("dorian.zwanzig")])
+    assert a.kind == "unattributed" and "booked by dorian.zwanzig" in a.text

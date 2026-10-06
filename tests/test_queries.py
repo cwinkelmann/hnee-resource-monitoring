@@ -44,8 +44,8 @@ def test_latest_reports_gpus_owners_and_assignees(db):
     assert {p["user"] for p in g6["procs"]} == {"dorian.zwanzig"}
     assert d["gpus"][4]["procs"][0]["user"] is None          # unattributed stays null
     assert [a["key"] for a in d["alerts"]] == [               # one alert per incident
-        "allocation:dorian.zwanzig:6", "allocation:dorian.zwanzig:7", "unattributed:4"]
-    assert "GPU 7 (22.7 GiB)" in d["alerts"][1]["text"]      # job + helper, summed
+        "booking:other:dorian.zwanzig:6", "booking:other:dorian.zwanzig:7", "unattributed:4"]
+    assert "using 22.7 GiB on GPU 7" in d["alerts"][1]["text"]      # job + helper, summed
 
 
 def test_latest_reports_the_slack_mode(tmp_path):

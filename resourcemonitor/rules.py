@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from resourcemonitor.claims import Booking
 from resourcemonitor.model import Snapshot
 from resourcemonitor.policy import Policy
 
 
 @dataclass(frozen=True)
 class Alert:
-    kind: str                 # "allocation" | "idle" | "capacity" | "unattributed" | "report"
+    kind: str                 # "over_booking" | "booked_gpu" | "idle" | "capacity" | "unattributed" | "report"
     key: str                  # incident identity; stable across polls
     text: str
     gpu_index: int | None = None
@@ -20,40 +21,64 @@ def _mib(n: int) -> str:
     return f"{n / 1024:.1f} GiB"
 
 
-def check_allocation(snap: Snapshot, pol: Policy) -> list[Alert]:
-    """A user holding a GPU assigned to somebody else: one alert per (user, GPU).
+def _active(bookings: list[Booking], snap: Snapshot) -> dict[int, list[Booking]]:
+    by_gpu: dict[int, list[Booking]] = {}
+    for b in bookings:
+        if b.active_at(snap.taken_at):
+            by_gpu.setdefault(b.gpu, []).append(b)
+    return by_gpu
 
-    Several processes of one user on one GPU are one incident, so their VRAM is summed.
+
+def check_bookings(snap: Snapshot, pol: Policy, bookings: list[Booking]) -> list[Alert]:
+    """Over-use of a booked share, and non-bookers crowding a booked card.
+
+    A GPU without an active booking is free. Several processes of one user on one
+    GPU are one incident, so their VRAM is summed.
     """
-    held: dict[tuple[str, int], int] = {}      # insertion order = first process seen
-    for p in snap.procs:
-        if p.user is None:
-            continue                       # unattributed: never accuse
-        assignee = pol.owner_of_gpu(p.gpu_index)
-        if assignee is None or assignee == p.user:
-            continue
-        held[(p.user, p.gpu_index)] = held.get((p.user, p.gpu_index), 0) + p.used_mib
-    return [Alert(
-        kind="allocation",
-        key=f"allocation:{user}:{gpu}",    # not the PID: one incident
-        gpu_index=gpu,
-        user=user,
-        text=(f"{user} is using GPU {gpu} ({_mib(mib)}), "
-              f"which is assigned to {pol.owner_of_gpu(gpu)}."),
-    ) for (user, gpu), mib in held.items()]
+    out: list[Alert] = []
+    total = {g.index: g.total_mib for g in snap.gpus}
+    for gpu, active in _active(bookings, snap).items():
+        booked_by_user: dict[str, int] = {}
+        for b in active:
+            booked_by_user[b.user] = booked_by_user.get(b.user, 0) + b.vram_mib
+        booked = sum(booked_by_user.values())
+        use: dict[str, int] = {}               # insertion order = first process seen
+        for p in snap.procs:
+            if p.gpu_index == gpu and p.user is not None:   # unattributed: never accuse
+                use[p.user] = use.get(p.user, 0) + p.used_mib
+        for user, mib in use.items():
+            if user in booked_by_user and mib > 1.10 * booked_by_user[user]:
+                out.append(Alert(
+                    kind="over_booking", key=f"booking:over:{user}:{gpu}",
+                    gpu_index=gpu, user=user,
+                    text=(f"{user} uses {_mib(mib)} on GPU {gpu} "
+                          f"but booked {_mib(booked_by_user[user])}.")))
+        others = {u: m for u, m in use.items() if u not in booked_by_user}
+        remainder = max(total.get(gpu, 0) - booked, 0)
+        if sum(others.values()) > remainder:
+            earliest_end = min(b.end for b in active)
+            for user, mib in others.items():
+                out.append(Alert(
+                    kind="booked_gpu", key=f"booking:other:{user}:{gpu}",
+                    gpu_index=gpu, user=user,
+                    text=(f"{user} is using {_mib(mib)} on GPU {gpu}; {_mib(booked)} is "
+                          f"booked by {', '.join(sorted(booked_by_user))} until "
+                          f"{earliest_end:%a %H:%M} UTC, {_mib(remainder)} unbooked.")))
+    return out
 
 
-def check_unattributed(snap: Snapshot, pol: Policy) -> list[Alert]:
-    """Holders whose owner could not be resolved, on a GPU that has an assignee.
+def check_unattributed(snap: Snapshot, pol: Policy, bookings: list[Booking]) -> list[Alert]:
+    """Holders whose owner could not be resolved, on a GPU that has an active booking.
 
     One alert per GPU, summing the processes that each hold at least idle_min_mib.
     Says so rather than staying silent or guessing; deliberately non-accusing.
     """
+    active = _active(bookings, snap)
     held: dict[int, int] = {}
     for p in snap.procs:
         if p.user is not None or p.used_mib < pol.idle_min_mib:
             continue
-        if pol.owner_of_gpu(p.gpu_index) is None:
+        if p.gpu_index not in active:
             continue
         held[p.gpu_index] = held.get(p.gpu_index, 0) + p.used_mib
     return [Alert(
@@ -62,8 +87,8 @@ def check_unattributed(snap: Snapshot, pol: Policy) -> list[Alert]:
         gpu_index=gpu,
         user=None,
         text=(f"An unattributed process is holding {_mib(mib)} on GPU "
-              f"{gpu} (assigned to {pol.owner_of_gpu(gpu)}); its owner could not be "
-              f"resolved."),
+              f"{gpu} (booked by {', '.join(sorted({b.user for b in active[gpu]}))}); "
+              f"its owner could not be resolved."),
     ) for gpu, mib in held.items()]
 
 

@@ -15,7 +15,7 @@ from resourcemonitor.notify import Notifier
 from resourcemonitor.paths import DEFAULT_ENERGY, DEFAULT_HISTORY, DEFAULT_POLICY, DEFAULT_STATE
 from resourcemonitor.policy import load_policy
 from resourcemonitor.probe import probe
-from resourcemonitor.rules import (Alert, IdleTracker, check_allocation, check_capacity,
+from resourcemonitor.rules import (Alert, IdleTracker, check_bookings, check_capacity,
                                     check_unattributed)
 from resourcemonitor.state import State
 
@@ -48,8 +48,8 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
     snap = probe()
     dt_s, rows = ledger.accumulate(snap)   # before the rules: a poll always costs energy
     ledger.save(energy_path)
-    alerts = check_allocation(snap, pol) + check_capacity(snap, pol) \
-        + check_unattributed(snap, pol) \
+    alerts = check_bookings(snap, pol, []) + check_capacity(snap, pol) \
+        + check_unattributed(snap, pol, []) \
         + tracker.observe(snap, pol)
     fresh = [a for a in alerts if state.should_send(a.key, snap.taken_at, pol.cooldown_s)]
     delivered = notifier.send(fresh, host) if fresh else False

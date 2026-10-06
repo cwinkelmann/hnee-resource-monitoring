@@ -71,7 +71,7 @@ def test_run_once_gates_repeat_alerts_and_saves_energy(monkeypatch, tmp_path):
     gpu = next(iter(pol.assignments[owner]))
     other = next(u for u in pol.assignments if u != owner)
     snap = Snapshot(datetime.now(timezone.utc),
-                    (GpuState(gpu, 81559, 22715, 100, 500.0),),
+                    (GpuState(gpu, 81559, 81000, 100, 500.0),),
                     (GpuProcess(1, gpu, 22706, other),))
     monkeypatch.setattr(cli, "probe", lambda: snap)
 
@@ -115,7 +115,7 @@ def _history_setup(monkeypatch, tmp_path):
     gpu = next(iter(pol.assignments[owner]))
     other = next(u for u in pol.assignments if u != owner)
     snap = Snapshot(datetime.now(timezone.utc),
-                    (GpuState(gpu, 81559, 22715, 100, 500.0),),
+                    (GpuState(gpu, 81559, 81000, 100, 500.0),),
                     (GpuProcess(1, gpu, 22706, other),))
     ticks = iter(range(1, 1000))
 

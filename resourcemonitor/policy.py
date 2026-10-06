@@ -18,22 +18,16 @@ class Policy:
     cooldown_s: int
     channel: str
 
-    def owner_of_gpu(self, index: int) -> str | None:
-        for user, gpus in self.assignments.items():
-            if index in gpus:
-                return user
-        return None
-
 
 def load_policy(path: Path | str) -> Policy:
     raw = tomllib.loads(Path(path).read_text())
-    for section in ("assignments", "rules", "notify"):
+    for section in ("rules", "notify"):
         if section not in raw:
             raise ValueError(f"policy is missing the [{section}] section")
 
     assignments: dict[str, frozenset[int]] = {}
     seen: dict[int, str] = {}
-    for user, gpus in raw["assignments"].items():
+    for user, gpus in raw.get("assignments", {}).items():
         for g in gpus:
             if not isinstance(g, int) or not 0 <= g <= MAX_GPU_INDEX:
                 raise ValueError(f"{user}: {g} is not a GPU index in 0..{MAX_GPU_INDEX}")
