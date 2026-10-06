@@ -48,6 +48,24 @@ def test_latest_reports_gpus_owners_and_assignees(db):
     assert "GPU 7 (22.7 GiB)" in d["alerts"][1]["text"]      # job + helper, summed
 
 
+def test_latest_reports_the_slack_mode(tmp_path):
+    p = tmp_path / "h.sqlite"
+    build_history(p, T0, hours=1, slack_mode="dry-run")
+    assert latest(open_ro(p), ASSIGN, T0 + timedelta(hours=1), 600)["slack"] == "dry-run"
+
+
+def test_latest_slack_mode_is_null_for_an_old_db_without_meta(tmp_path):
+    p = tmp_path / "old.sqlite"
+    build_history(p, T0, hours=1)
+    import sqlite3
+    c = sqlite3.connect(p); c.execute("DROP TABLE meta"); c.commit(); c.close()
+    assert latest(open_ro(p), ASSIGN, T0 + timedelta(hours=1), 600)["slack"] is None
+
+
+def test_latest_slack_mode_is_null_when_never_recorded(db):
+    assert latest(open_ro(db), ASSIGN, T0 + timedelta(hours=48), 600)["slack"] is None
+
+
 def test_latest_is_stale_when_the_monitor_stopped(db):
     d = latest(open_ro(db), ASSIGN, T0 + timedelta(days=3), stale_after_s=600)
     assert d["stale"] is True and d["age_s"] > 600

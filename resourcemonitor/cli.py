@@ -56,12 +56,13 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
         + check_unattributed(snap, pol) \
         + tracker.observe(snap, pol)
     fresh = [a for a in alerts if state.should_send(a.key, snap.taken_at, pol.cooldown_s)]
-    if fresh:
-        notifier.send(fresh, host)
+    delivered = notifier.send(fresh, host) if fresh else False
     state.save()
+    # "sent" in history means it reached Slack: never in a dry run, never on a failed post.
+    sent_keys = {a.key for a in fresh} if delivered and not notifier.dry_run else set()
     if history is not None:
         try:
-            history.record(snap, dt_s, rows, alerts, {a.key for a in fresh})
+            history.record(snap, dt_s, rows, alerts, sent_keys)
         except (sqlite3.Error, OSError) as e:
             # class name only: the message may embed paths
             print(f"history write failed: {e.__class__.__name__}", flush=True)
@@ -110,7 +111,8 @@ def main(argv=None) -> int:
     history = None                   # watch only: once/report never write history
     if not args.no_history:
         try:
-            history = HistoryWriter(args.history, args.retention_days)
+            history = HistoryWriter(args.history, args.retention_days,
+                                    slack_mode="dry-run" if notifier.dry_run else "posting")
         except (sqlite3.Error, OSError) as e:
             print(f"history disabled: {e.__class__.__name__}", flush=True)
 

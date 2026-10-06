@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS energy_samples (ts TEXT NOT NULL, gpu INTEGER NOT NUL
   bucket TEXT NOT NULL, kwh REAL NOT NULL, seconds REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS alerts (ts TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
   gpu INTEGER, user TEXT, text TEXT NOT NULL, sent INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS gpu_samples_ts ON gpu_samples(ts);
 CREATE INDEX IF NOT EXISTS proc_samples_ts ON proc_samples(ts);
 CREATE INDEX IF NOT EXISTS proc_samples_gpu_pid_ts ON proc_samples(gpu, pid, ts);
@@ -31,10 +32,16 @@ CREATE INDEX IF NOT EXISTS alerts_ts ON alerts(ts);
 """
 
 _TS_TABLES = ("gpu_samples", "proc_samples", "energy_samples", "alerts")
+SLACK_MODES = ("dry-run", "posting")
 
 
 class HistoryWriter:
-    def __init__(self, path: Path | str, retention_days: int = 90):
+    def __init__(self, path: Path | str, retention_days: int = 90,
+                 slack_mode: str | None = None):
+        """slack_mode ('dry-run' | 'posting') is stored in meta so the page can say
+        whether alerts actually reach Slack; None leaves any stored value alone."""
+        if slack_mode is not None and slack_mode not in SLACK_MODES:
+            raise ValueError(f"slack_mode must be one of {SLACK_MODES}, not {slack_mode!r}")
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.retention_days = retention_days
@@ -43,6 +50,11 @@ class HistoryWriter:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        if slack_mode is not None:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('slack', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (slack_mode,))
 
     def record(self, snap: Snapshot, dt_s: float | None, energy: list[EnergyRow],
                alerts: list[Alert], sent_keys: set[str]) -> None:

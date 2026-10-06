@@ -76,6 +76,8 @@ def test_run_once_gates_repeat_alerts_and_saves_energy(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "probe", lambda: snap)
 
     class Rec:
+        dry_run = False
+
         def __init__(self):
             self.sent = []
 
@@ -123,12 +125,15 @@ def _history_setup(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "probe", fake_probe)
 
     class Rec:
+        dry_run = False
+
         def __init__(self):
             self.sent = []
+            self.ok = True
 
         def send(self, alerts, host):
             self.sent.append(list(alerts))
-            return True
+            return self.ok
 
     return (pol, State.load(tmp_path / "s.json"), Rec(), IdleTracker(), EnergyLedger(),
             tmp_path / "e.json")
@@ -145,7 +150,54 @@ def test_run_once_records_history_with_sent_flags(tmp_path, monkeypatch):
     hist.close()
     rows = sqlite3.connect(tmp_path / "h.sqlite").execute(
         "SELECT ts, sent FROM alerts ORDER BY rowid").fetchall()
-    assert [s for _, s in rows][:1] == [1] and rows[-1][1] == 0   # sent once, then suppressed
+    assert [s for _, s in rows] == [1, 0]                     # sent once, then suppressed
+
+
+def _sent_flags(tmp_path, monkeypatch, *, dry_run, ok):
+    import sqlite3
+    from resourcemonitor import cli
+    from resourcemonitor.history import HistoryWriter
+    pol, state, rec, tracker, ledger, epath = _history_setup(monkeypatch, tmp_path)
+    rec.dry_run, rec.ok = dry_run, ok
+    hist = HistoryWriter(tmp_path / "h.sqlite")
+    fresh = cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath, history=hist)
+    hist.close()
+    assert fresh == 1 and len(rec.sent) == 1                 # the notifier was still called
+    return [s for (s,) in sqlite3.connect(tmp_path / "h.sqlite").execute(
+        "SELECT sent FROM alerts ORDER BY rowid")]
+
+
+def test_a_dry_run_never_records_an_alert_as_sent(tmp_path, monkeypatch):
+    assert _sent_flags(tmp_path, monkeypatch, dry_run=True, ok=True) == [0]
+
+
+def test_a_failed_slack_post_is_not_recorded_as_sent(tmp_path, monkeypatch):
+    assert _sent_flags(tmp_path, monkeypatch, dry_run=False, ok=False) == [0]
+
+
+def test_the_cooldown_still_applies_after_a_dry_run(tmp_path, monkeypatch):
+    from resourcemonitor import cli
+    pol, state, rec, tracker, ledger, epath = _history_setup(monkeypatch, tmp_path)
+    rec.dry_run = True
+    assert cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath) == 1
+    assert cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath) == 0
+
+
+def test_watch_stores_the_slack_mode(tmp_path, monkeypatch):
+    import sqlite3
+    import pytest
+    from resourcemonitor import cli
+
+    def stop(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "run_once", stop)
+    policy = Path(__file__).parent.parent / "deploy" / "policy.example.toml"
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["watch", "--policy", str(policy), "--state", str(tmp_path / "s.json"),
+                  "--energy", str(tmp_path / "e.json"), "--history", str(tmp_path / "h.sqlite")])
+    assert sqlite3.connect(tmp_path / "h.sqlite").execute(
+        "SELECT value FROM meta WHERE key='slack'").fetchall() == [("dry-run",)]
 
 
 def test_a_broken_history_never_stops_alerts(tmp_path, monkeypatch, capsys):

@@ -157,6 +157,7 @@ rect.unatt { stroke: var(--unatt-stroke); stroke-width: 1.5; stroke-dasharray: 4
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
 .swatch.unatt { outline: 1px dashed var(--unatt-stroke); outline-offset: -1px; }
 
+.slack-note { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
 .alerts { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13px; }
 .alerts li { padding: 4px 0; border-top: 1px solid var(--grid); display: flex; gap: 8px; }
 .alerts .icon { width: 1.4em; text-align: center; flex: none; }

@@ -25,3 +25,10 @@ def test_page_has_the_three_sections_and_caveat_slot():
     html = (WEB / "index.html").read_text()
     for id_ in ("now", "timeline", "usage", "timeseries", "caveats", "stale-banner"):
         assert f'id="{id_}"' in html
+
+
+def test_dry_run_slack_line_is_on_the_page_and_per_alert_status_only_when_posting():
+    html = (WEB / "index.html").read_text()
+    assert "Slack posting is off (dry run) — alerts are shown here only." in html
+    js = (WEB / "app.js").read_text()
+    assert 'd.slack !== "dry-run"' in js and 'd.slack === "posting"' in js

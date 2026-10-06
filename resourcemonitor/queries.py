@@ -49,7 +49,16 @@ def latest(conn: sqlite3.Connection, assignments: dict[str, frozenset[int]],
                   "SELECT kind, key, gpu, user, text, sent FROM alerts WHERE ts=? "
                   "ORDER BY rowid", (ts,))]
     return {"ts": ts, "age_s": age_s, "stale": age_s > stale_after_s,
-            "gpus": gpus, "alerts": alerts}
+            "slack": _slack_mode(conn), "gpus": gpus, "alerts": alerts}
+
+
+def _slack_mode(conn: sqlite3.Connection) -> str | None:
+    """'dry-run' | 'posting' as the monitor last recorded it; None for older DBs."""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'slack'").fetchone()
+    except sqlite3.OperationalError:          # no meta table: written before it existed
+        return None
+    return row[0] if row and row[0] in ("dry-run", "posting") else None
 
 
 def _monday(d: date) -> date:

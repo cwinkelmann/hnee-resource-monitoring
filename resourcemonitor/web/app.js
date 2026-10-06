@@ -191,6 +191,9 @@
     clear(grid);
     for (const g of d.gpus) grid.appendChild(gpuCard(g));
 
+    // Slack wording only when the monitor recorded its mode: one line for a dry run,
+    // a per-alert status only when it is really posting, nothing for older histories.
+    $("slack-note").hidden = d.slack !== "dry-run";
     const alerts = $("alerts");
     clear(alerts);
     if (!d.alerts.length) {
@@ -202,7 +205,9 @@
       icon.title = a.kind;
       li.appendChild(icon);
       li.appendChild(el("span", "", a.text));
-      li.appendChild(el("span", "sent", a.sent ? "(Slack: sent)" : "(Slack: in cooldown)"));
+      if (d.slack === "posting") {
+        li.appendChild(el("span", "sent", a.sent ? "(Slack: sent)" : "(Slack: in cooldown)"));
+      }
       alerts.appendChild(li);
     }
   }

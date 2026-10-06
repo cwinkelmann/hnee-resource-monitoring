@@ -86,3 +86,19 @@ def test_fixture_has_eight_runs_on_gpu6_and_honours_the_gap(tmp_path):
         [(2000,), (2001,)]                                # main job + helper, whole period
     assert _rows(db, "SELECT COUNT(*) FROM polls") == [(48 * 12 - 12,)]
     assert _rows(db, f"SELECT dt_s FROM polls WHERE ts='{(gap[1]).isoformat()}'") == [(None,)]
+
+
+def test_writer_records_the_slack_mode_in_meta(tmp_path):
+    db = tmp_path / "h.sqlite"
+    HistoryWriter(db).close()                                 # no mode given: nothing stored
+    assert _rows(db, "SELECT key, value FROM meta") == []
+    HistoryWriter(db, slack_mode="dry-run").close()
+    assert _rows(db, "SELECT key, value FROM meta") == [("slack", "dry-run")]
+    HistoryWriter(db, slack_mode="posting").close()           # a restart with --post updates it
+    assert _rows(db, "SELECT key, value FROM meta") == [("slack", "posting")]
+
+
+def test_writer_rejects_an_unknown_slack_mode(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        HistoryWriter(tmp_path / "h.sqlite", slack_mode="maybe")

@@ -43,10 +43,11 @@ def _snapshot(t: datetime, elapsed_s: int) -> Snapshot:
 
 
 def build_history(path: Path | str, start: datetime, hours: int, interval_s: int = 300,
-                  gap: tuple[datetime, datetime] | None = None) -> None:
+                  gap: tuple[datetime, datetime] | None = None,
+                  slack_mode: str | None = None) -> None:
     """Alerts come from the real rules; only the first poll's alerts are marked sent."""
     ledger = EnergyLedger(max_gap_s=interval_s * 5)
-    writer = HistoryWriter(path)
+    writer = HistoryWriter(path, slack_mode=slack_mode)
     try:
         first = True
         for k in range(hours * 3600 // interval_s):
