@@ -1,4 +1,5 @@
 import json
+import shutil
 import threading
 import urllib.error
 import urllib.request
@@ -27,10 +28,24 @@ channel = "#gpu-watch"
 """
 
 
+_HISTORY_TEMPLATE = None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _history_template(tmp_path_factory):
+    """The 48 h fixture history is built once per module; each test gets its own copy."""
+    global _HISTORY_TEMPLATE
+    path = tmp_path_factory.mktemp("history") / "h.sqlite"
+    build_history(path, T0, hours=48)
+    _HISTORY_TEMPLATE = path
+    yield path
+    _HISTORY_TEMPLATE = None
+
+
 def _serve(tmp_path, with_history=True, now=NOW, seed=False):
     hist = tmp_path / "h.sqlite"
     if with_history:
-        build_history(hist, T0, hours=48)
+        shutil.copy(_HISTORY_TEMPLATE, hist)
     pol = tmp_path / "policy.toml"; pol.write_text(POLICY)
     claims = tmp_path / "claims.sqlite"
     if seed:
