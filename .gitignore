@@ -4,3 +4,4 @@ __pycache__/
 .superpowers/
 .idea/
 .claude/settings.local.json
+.playwright-mcp/
