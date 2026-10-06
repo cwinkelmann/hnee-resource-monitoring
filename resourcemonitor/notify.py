@@ -7,7 +7,8 @@ import urllib.request
 
 from resourcemonitor.rules import Alert
 
-ICON = {"allocation": ":no_entry_sign:", "idle": ":zzz:", "capacity": ":rotating_light:"}
+ICON = {"allocation": ":no_entry_sign:", "idle": ":zzz:", "capacity": ":rotating_light:",
+        "unattributed": ":grey_question:", "report": ":zap:"}
 
 
 def build_payload(alerts: list[Alert], host: str) -> dict:
@@ -46,6 +47,7 @@ class Notifier:
                 return 200 <= r.status < 300
         except urllib.error.URLError as e:
             # Slack being down must not kill the daemon. Report and carry on; the
-            # cooldown has already been consumed, so this incident waits a cycle.
+            # cooldown is consumed before the send, so this incident stays silent for
+            # the full cooldown, not just one cycle.
             print(f"slack post failed: {e.__class__.__name__}")
             return False

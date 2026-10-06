@@ -45,3 +45,8 @@ def test_empty_alert_list_sends_nothing(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no send")))
 
     assert Notifier("https://x", dry_run=False).send([], "carrot") is False
+
+
+def test_new_kinds_have_their_own_icon():
+    from resourcemonitor.notify import ICON
+    assert ICON["unattributed"] and ICON["report"] == ":zap:"

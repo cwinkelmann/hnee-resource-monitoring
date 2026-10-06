@@ -82,3 +82,28 @@ def test_capacity_boundary_is_inclusive():
     gpus = [GpuState(i, 81559, 81559 - 40960, 50) for i in range(8)]
 
     assert check_capacity(_snap(gpus, []), POL) == []
+
+
+def test_unattributed_process_on_an_assigned_gpu_is_reported_non_accusingly():
+    from resourcemonitor.rules import check_unattributed
+    snap = _snap([GpuState(6, 81559, 22715, 100)], [GpuProcess(9, 6, 22706, None)])
+
+    alerts = check_unattributed(snap, POL)
+
+    assert len(alerts) == 1
+    a = alerts[0]
+    assert a.kind == "unattributed" and a.key == "unattributed:6"
+    assert a.user is None and a.gpu_index == 6
+    assert "could not be resolved" in a.text and "cwinkelmann" in a.text
+
+
+def test_unattributed_ignores_small_attributed_and_unassigned():
+    from resourcemonitor.rules import check_unattributed
+    pol = Policy(assignments={"a": frozenset({0})}, idle_util_pct=5, idle_min_mib=1024,
+                 idle_grace_s=1800, capacity_free_mib=40960, cooldown_s=3600, channel="#x")
+    snap = _snap([GpuState(0, 81559, 0, 0), GpuState(1, 81559, 0, 0)],
+                 [GpuProcess(1, 0, 100, None),        # below idle_min_mib
+                  GpuProcess(2, 0, 5000, "a"),        # attributed
+                  GpuProcess(3, 1, 5000, None)])      # GPU has no assignee
+
+    assert check_unattributed(snap, pol) == []

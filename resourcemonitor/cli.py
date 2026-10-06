@@ -11,7 +11,8 @@ from resourcemonitor.energy import EnergyLedger, format_report
 from resourcemonitor.notify import Notifier
 from resourcemonitor.policy import load_policy
 from resourcemonitor.probe import probe
-from resourcemonitor.rules import Alert, IdleTracker, check_allocation, check_capacity
+from resourcemonitor.rules import (Alert, IdleTracker, check_allocation, check_capacity,
+                                    check_unattributed)
 from resourcemonitor.state import State
 
 DEFAULT_POLICY = Path.home() / ".config/resourcemonitor/policy.toml"
@@ -38,6 +39,7 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path) -> int:
     ledger.accumulate(snap)          # before the rules: a poll always costs energy
     ledger.save(energy_path)
     alerts = check_allocation(snap, pol) + check_capacity(snap, pol) \
+        + check_unattributed(snap, pol) \
         + tracker.observe(snap, pol)
     fresh = [a for a in alerts if state.should_send(a.key, snap.taken_at, pol.cooldown_s)]
     if fresh:

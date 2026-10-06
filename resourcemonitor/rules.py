@@ -9,7 +9,7 @@ from resourcemonitor.policy import Policy
 
 @dataclass(frozen=True)
 class Alert:
-    kind: str                 # "allocation" | "idle" | "capacity"
+    kind: str                 # "allocation" | "idle" | "capacity" | "unattributed" | "report"
     key: str                  # incident identity; stable across polls
     text: str
     gpu_index: int | None = None
@@ -36,6 +36,30 @@ def check_allocation(snap: Snapshot, pol: Policy) -> list[Alert]:
             user=p.user,
             text=(f"{p.user} is using GPU {p.gpu_index} ({_mib(p.used_mib)}), "
                   f"which is assigned to {assignee}."),
+        ))
+    return out
+
+
+def check_unattributed(snap: Snapshot, pol: Policy) -> list[Alert]:
+    """A holder whose owner could not be resolved, on a GPU that has an assignee.
+
+    Says so rather than staying silent or guessing; deliberately non-accusing.
+    """
+    out = []
+    for p in snap.procs:
+        if p.user is not None or p.used_mib < pol.idle_min_mib:
+            continue
+        assignee = pol.owner_of_gpu(p.gpu_index)
+        if assignee is None:
+            continue
+        out.append(Alert(
+            kind="unattributed",
+            key=f"unattributed:{p.gpu_index}",
+            gpu_index=p.gpu_index,
+            user=None,
+            text=(f"An unattributed process is holding {_mib(p.used_mib)} on GPU "
+                  f"{p.gpu_index} (assigned to {assignee}); its owner could not be "
+                  f"resolved."),
         ))
     return out
 
