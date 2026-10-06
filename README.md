@@ -44,7 +44,8 @@ the payloads. Options: `--policy`, `--state`, `--energy`, `--interval`, `--price
 
 1. Copy `deploy/policy.example.toml` to `~/.config/resourcemonitor/policy.toml` and edit.
 2. Webhook: put `SLACK_WEBHOOK_URL=...` in `~/.config/resourcemonitor/env` (mode 0600).
-   The URL is a bearer credential: never commit or log it.
+   The URL is a bearer credential: never commit or log it, and never put it in a command line
+   (argv is visible via `ps`, history keeps it); write the file from an editor or pipe it over stdin.
 3. Install the unit: copy `deploy/resourcemonitor.service` to `~/.config/systemd/user/`, then
    `systemctl --user daemon-reload && systemctl --user enable --now resourcemonitor`.
 

@@ -45,9 +45,14 @@ Asking root for a uid→name table does not help — the UID is destroyed before
 3. **Webhook secret** — mode 0600, never committed:
 
    ```bash
-   ssh cwinkelmann@10.188.1.1 'install -m 600 /dev/null ~/.config/resourcemonitor/env && \
-     printf "SLACK_WEBHOOK_URL=%s\n" "$URL" > ~/.config/resourcemonitor/env'
+   read -rs URL        # paste the URL here; never type it inline on a command line
+   printf 'SLACK_WEBHOOK_URL=%s\n' "$URL" | ssh cwinkelmann@10.188.1.1 \
+     'umask 077; mkdir -p ~/.config/resourcemonitor; cat > ~/.config/resourcemonitor/env'
+   unset URL
    ```
+
+   The secret travels over stdin, so it never appears in argv (`ps`) or shell history, and
+   `$URL` is expanded locally, not inside the remote command.
 
 4. **Dry run first, and read the output.**
 
