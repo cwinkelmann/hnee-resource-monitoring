@@ -92,3 +92,48 @@ def test_unattributed_rule_fires_on_booked_gpus_only():
     assert check_unattributed(_snap(procs), POL, []) == []
     (a,) = check_unattributed(_snap(procs), POL, [_b("dorian.zwanzig")])
     assert a.kind == "unattributed" and "booked by dorian.zwanzig" in a.text
+
+
+def test_unattributed_processes_on_a_booked_gpu_are_summed_into_one_alert():
+    procs = [GpuProcess(20, 4, 2048, None), GpuProcess(21, 4, 4096, None)]
+    (a,) = check_unattributed(_snap(procs), POL, [_b("dorian.zwanzig")])
+    assert a.key == "unattributed:4" and a.user is None and a.gpu_index == 4
+    assert "holding 6.0 GiB on GPU 4" in a.text and "could not be resolved" in a.text
+
+
+def test_unattributed_ignores_small_and_attributed_processes():
+    procs = [GpuProcess(1, 4, 100, None),               # below idle_min_mib
+             GpuProcess(2, 4, 5000, "andre.kliem")]     # attributed
+    assert check_unattributed(_snap(procs), POL, [_b("dorian.zwanzig")]) == []
+
+
+def test_unattributed_alerts_only_on_the_booked_gpu():
+    snap = Snapshot(T0, (GpuState(4, 81559, 4096, 0), GpuState(5, 81559, 4096, 0)),
+                    (GpuProcess(1, 4, 4096, None), GpuProcess(2, 5, 4096, None)))
+    (a,) = check_unattributed(snap, POL, [_b("dorian.zwanzig")])
+    assert a.key == "unattributed:4"
+
+
+def test_booked_gpu_alert_key_and_full_text_with_two_bookers():
+    b = [_b("zed", gib=20, hours=5, id=1),                 # ends T0 + 4h
+         _b("amy", gib=30, hours=3, id=2)]                 # ends T0 + 2h = Tue 14:00
+    (a,) = check_bookings(_snap([_p("andre.kliem", 35 * GIB)]), POL, b)
+    assert a.kind == "booked_gpu" and a.key == "booking:other:andre.kliem:4"
+    assert a.text == ("andre.kliem is using 35.0 GiB on GPU 4; 50.0 GiB is booked by "
+                      "amy, zed until Tue 14:00 UTC, 29.6 GiB unbooked.")
+
+
+def test_bookings_are_per_gpu():
+    b = [_b("dorian.zwanzig", gpu=4, gib=40)]
+    snap = Snapshot(T0, (GpuState(4, 81559, 0, 0), GpuState(5, 81559, 70 * GIB, 90)),
+                    (GpuProcess(1, 5, 70 * GIB, "dorian.zwanzig"),))
+    assert check_bookings(snap, POL, b) == []
+
+
+def test_over_booker_and_crowding_non_booker_are_both_reported():
+    b = [_b("dorian.zwanzig", gib=40)]
+    procs = [_p("dorian.zwanzig", 50 * GIB), _p("andre.kliem", 45 * GIB, pid=2)]
+    alerts = check_bookings(_snap(procs), POL, b)
+    assert {(a.kind, a.key) for a in alerts} == {
+        ("over_booking", "booking:over:dorian.zwanzig:4"),
+        ("booked_gpu", "booking:other:andre.kliem:4")}

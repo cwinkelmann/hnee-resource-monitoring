@@ -47,7 +47,7 @@ def check_bookings(snap: Snapshot, pol: Policy, bookings: list[Booking]) -> list
             if p.gpu_index == gpu and p.user is not None:   # unattributed: never accuse
                 use[p.user] = use.get(p.user, 0) + p.used_mib
         for user, mib in use.items():
-            if user in booked_by_user and mib > 1.10 * booked_by_user[user]:
+            if user in booked_by_user and mib * 10 > booked_by_user[user] * 11:
                 out.append(Alert(
                     kind="over_booking", key=f"booking:over:{user}:{gpu}",
                     gpu_index=gpu, user=user,
