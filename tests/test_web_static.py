@@ -23,8 +23,16 @@ def test_data_never_goes_through_innerHTML():
 
 def test_page_has_the_three_sections_and_caveat_slot():
     html = (WEB / "index.html").read_text()
-    for id_ in ("now", "timeline", "usage", "timeseries", "caveats", "stale-banner"):
+    for id_ in ("now", "timeline", "usage", "timeseries", "caveats", "stale-banner",
+                "bookings", "book-form", "book-error", "booking-calendar", "booking-detail",
+                "booking-changes"):
         assert f'id="{id_}"' in html
+
+
+def test_bookings_replace_assignments_and_never_use_blocking_dialogs():
+    js = (WEB / "app.js").read_text()
+    assert "assigned_to" not in js
+    assert "confirm(" not in js
 
 
 def test_dry_run_slack_line_is_on_the_page_and_per_alert_status_only_when_posting():
@@ -75,3 +83,15 @@ def test_pack_lanes_keeps_sequential_jobs_on_one_lane_and_never_returns_zero_lan
 def test_timeline_ends_ongoing_bars_at_the_last_poll_when_stale():
     js = (WEB / "app.js").read_text()
     assert "state.now.stale" in js and "liveEnd" in js
+
+
+def test_free_vram_is_the_minimum_over_the_window_counting_only_live_claims_on_that_gpu():
+    import shutil, subprocess
+    import pytest
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    out = subprocess.run([node, "tests/js/test_free_vram.mjs"], capture_output=True, text=True,
+                         timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert "ok" in out.stdout
