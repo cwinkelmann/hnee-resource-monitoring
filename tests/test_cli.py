@@ -95,3 +95,101 @@ def test_run_once_gates_repeat_alerts_and_saves_energy(monkeypatch, tmp_path):
     assert first >= 1 and len(rec.sent) == 1
     assert second == 0 and len(rec.sent) == 1
     assert epath.exists()
+
+
+def _history_setup(monkeypatch, tmp_path):
+    """Fake probe producing one alert, a recording notifier, and fresh run state."""
+    import dataclasses
+    from datetime import datetime, timedelta, timezone
+    from resourcemonitor import cli
+    from resourcemonitor.energy import EnergyLedger
+    from resourcemonitor.model import GpuProcess, GpuState, Snapshot
+    from resourcemonitor.policy import load_policy
+    from resourcemonitor.rules import IdleTracker
+    from resourcemonitor.state import State
+
+    pol = load_policy(Path(__file__).parent.parent / "deploy" / "policy.example.toml")
+    owner = next(iter(pol.assignments))
+    gpu = next(iter(pol.assignments[owner]))
+    other = next(u for u in pol.assignments if u != owner)
+    snap = Snapshot(datetime.now(timezone.utc),
+                    (GpuState(gpu, 81559, 22715, 100, 500.0),),
+                    (GpuProcess(1, gpu, 22706, other),))
+    ticks = iter(range(1, 1000))
+
+    def fake_probe():            # each poll gets its own timestamp, as in real life
+        return dataclasses.replace(snap, taken_at=snap.taken_at + timedelta(seconds=next(ticks)))
+
+    monkeypatch.setattr(cli, "probe", fake_probe)
+
+    class Rec:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, alerts, host):
+            self.sent.append(list(alerts))
+            return True
+
+    return (pol, State.load(tmp_path / "s.json"), Rec(), IdleTracker(), EnergyLedger(),
+            tmp_path / "e.json")
+
+
+def test_run_once_records_history_with_sent_flags(tmp_path, monkeypatch):
+    import sqlite3
+    from resourcemonitor import cli
+    from resourcemonitor.history import HistoryWriter
+    pol, state, rec, tracker, ledger, epath = _history_setup(monkeypatch, tmp_path)
+    hist = HistoryWriter(tmp_path / "h.sqlite")
+    cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath, history=hist)
+    cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath, history=hist)
+    hist.close()
+    rows = sqlite3.connect(tmp_path / "h.sqlite").execute(
+        "SELECT ts, sent FROM alerts ORDER BY rowid").fetchall()
+    assert [s for _, s in rows][:1] == [1] and rows[-1][1] == 0   # sent once, then suppressed
+
+
+def test_a_broken_history_never_stops_alerts(tmp_path, monkeypatch, capsys):
+    import sqlite3
+    from resourcemonitor import cli
+
+    class Exploding:
+        def record(self, *a, **k):
+            raise sqlite3.OperationalError("disk I/O error at /secret/path")
+
+    pol, state, rec, tracker, ledger, epath = _history_setup(monkeypatch, tmp_path)
+    sent = cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath,
+                        history=Exploding())
+    assert sent >= 1 and rec.sent                           # alerts went out
+    out = capsys.readouterr().out
+    assert "history write failed: OperationalError" in out and "/secret/path" not in out
+
+
+def test_history_flags_parse():
+    a = build_parser().parse_args(["watch", "--retention-days", "30", "--no-history"])
+    assert a.retention_days == 30 and a.no_history is True
+
+
+def test_watch_survives_a_history_constructor_failure(tmp_path, monkeypatch, capsys):
+    import sqlite3
+    import pytest
+    from resourcemonitor import cli
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("unable to open /secret/path")
+
+    seen = []
+
+    def fake_run_once(*a, **k):
+        seen.append(k.get("history", "missing"))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "HistoryWriter", boom)
+    monkeypatch.setattr(cli, "run_once", fake_run_once)
+    policy = Path(__file__).parent.parent / "deploy" / "policy.example.toml"
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["watch", "--policy", str(policy), "--state", str(tmp_path / "s.json"),
+                  "--energy", str(tmp_path / "e.json"),
+                  "--history", str(tmp_path / "h.sqlite")])
+    assert seen == [None]
+    out = capsys.readouterr().out
+    assert "history disabled: OperationalError" in out and "/secret/path" not in out

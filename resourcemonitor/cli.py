@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import os
 import socket
+import sqlite3
 import time
 from pathlib import Path
 
 from resourcemonitor.energy import EnergyLedger, format_report
+from resourcemonitor.history import HistoryWriter
 from resourcemonitor.model import Snapshot
 from resourcemonitor.notify import Notifier
 from resourcemonitor.policy import load_policy
@@ -19,6 +21,7 @@ from resourcemonitor.state import State
 DEFAULT_POLICY = Path.home() / ".config/resourcemonitor/policy.toml"
 DEFAULT_STATE = Path.home() / ".local/state/resourcemonitor/state.json"
 DEFAULT_ENERGY = Path.home() / ".local/state/resourcemonitor/energy.json"
+DEFAULT_HISTORY = Path.home() / ".local/state/resourcemonitor/history.sqlite"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,12 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--energy", type=Path, default=DEFAULT_ENERGY)
     p.add_argument("--price", type=float, default=0.30,
                    help="EUR per kWh, used only to annotate the report")
+    p.add_argument("--history", type=Path, default=DEFAULT_HISTORY,
+                   help="SQLite history file (watch only)")
+    p.add_argument("--no-history", action="store_true", help="do not record history")
+    p.add_argument("--retention-days", type=int, default=90,
+                   help="history older than this is pruned")
     return p
 
 
-def run_once(pol, state, notifier, tracker, ledger, host, energy_path) -> int:
+def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
+             history=None) -> int:
     snap = probe()
-    ledger.accumulate(snap)          # before the rules: a poll always costs energy
+    dt_s, rows = ledger.accumulate(snap)   # before the rules: a poll always costs energy
     ledger.save(energy_path)
     alerts = check_allocation(snap, pol) + check_capacity(snap, pol) \
         + check_unattributed(snap, pol) \
@@ -46,6 +55,12 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path) -> int:
     if fresh:
         notifier.send(fresh, host)
     state.save()
+    if history is not None:
+        try:
+            history.record(snap, dt_s, rows, alerts, {a.key for a in fresh})
+        except (sqlite3.Error, OSError) as e:
+            # class name only: the message may embed paths
+            print(f"history write failed: {e.__class__.__name__}", flush=True)
     return len(fresh)
 
 
@@ -77,9 +92,17 @@ def main(argv=None) -> int:
         run_once(pol, state, notifier, tracker, ledger, host, args.energy)
         return 0
 
+    history = None                   # watch only: once/report never write history
+    if not args.no_history:
+        try:
+            history = HistoryWriter(args.history, args.retention_days)
+        except (sqlite3.Error, OSError) as e:
+            print(f"history disabled: {e.__class__.__name__}", flush=True)
+
     while True:                      # watch
         try:
-            run_once(pol, state, notifier, tracker, ledger, host, args.energy)
+            run_once(pol, state, notifier, tracker, ledger, host, args.energy,
+                     history=history)
         except Exception as e:       # a bad poll must not end the service
             # class name only: the message may embed the webhook URL
             print(f"poll failed: {e.__class__.__name__}", flush=True)
