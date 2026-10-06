@@ -82,6 +82,7 @@ def test_fixture_has_eight_runs_on_gpu6_and_honours_the_gap(tmp_path):
     gap = (T0 + timedelta(hours=1), T0 + timedelta(hours=2))
     build_history(db, T0, hours=48, gap=gap)
     assert _rows(db, "SELECT COUNT(DISTINCT pid) FROM proc_samples WHERE gpu=6") == [(8,)]
-    assert _rows(db, "SELECT COUNT(DISTINCT pid) FROM proc_samples WHERE gpu=7") == [(1,)]
+    assert _rows(db, "SELECT DISTINCT pid FROM proc_samples WHERE gpu=7 ORDER BY pid") == \
+        [(2000,), (2001,)]                                # main job + helper, whole period
     assert _rows(db, "SELECT COUNT(*) FROM polls") == [(48 * 12 - 12,)]
     assert _rows(db, f"SELECT dt_s FROM polls WHERE ts='{(gap[1]).isoformat()}'") == [(None,)]

@@ -43,7 +43,9 @@ def test_latest_reports_gpus_owners_and_assignees(db):
     assert g6["assigned_to"] == "cwinkelmann"
     assert {p["user"] for p in g6["procs"]} == {"dorian.zwanzig"}
     assert d["gpus"][4]["procs"][0]["user"] is None          # unattributed stays null
-    assert any(a["kind"] == "allocation" for a in d["alerts"])
+    assert [a["key"] for a in d["alerts"]] == [               # one alert per incident
+        "allocation:dorian.zwanzig:6", "allocation:dorian.zwanzig:7", "unattributed:4"]
+    assert "GPU 7 (22.7 GiB)" in d["alerts"][1]["text"]      # job + helper, summed
 
 
 def test_latest_is_stale_when_the_monitor_stopped(db):
@@ -103,7 +105,12 @@ def test_timeline_shows_who_did_what_when(db_nogap):
 
 def test_timeline_splits_a_job_at_a_monitoring_gap(db):
     tl = timeline(open_ro(db), hours=48, now=T0 + timedelta(hours=48))
-    assert len(tl["gpus"]["7"]) == 2                          # one pid, but the 6 h gap splits it
+    g7 = tl["gpus"]["7"]                                     # two pids, each split by the 6 h gap
+    assert sorted(j["pid"] for j in g7) == [2000, 2000, 2001, 2001]
+    gap_start, gap_end = (T0 + timedelta(hours=30)).isoformat(), (T0 + timedelta(hours=36)).isoformat()
+    for pid in (2000, 2001):
+        first, second = sorted((j for j in g7 if j["pid"] == pid), key=lambda j: j["start"])
+        assert first["end"] < gap_start and second["start"] == gap_end
 
 
 def test_timeline_window_excludes_old_jobs(db):

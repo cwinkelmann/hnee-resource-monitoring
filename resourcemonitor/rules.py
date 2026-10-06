@@ -21,47 +21,50 @@ def _mib(n: int) -> str:
 
 
 def check_allocation(snap: Snapshot, pol: Policy) -> list[Alert]:
-    """A process on a GPU assigned to somebody else."""
-    out = []
+    """A user holding a GPU assigned to somebody else: one alert per (user, GPU).
+
+    Several processes of one user on one GPU are one incident, so their VRAM is summed.
+    """
+    held: dict[tuple[str, int], int] = {}      # insertion order = first process seen
     for p in snap.procs:
         if p.user is None:
             continue                       # unattributed: never accuse
         assignee = pol.owner_of_gpu(p.gpu_index)
         if assignee is None or assignee == p.user:
             continue
-        out.append(Alert(
-            kind="allocation",
-            key=f"allocation:{p.user}:{p.gpu_index}",   # not the PID: one incident
-            gpu_index=p.gpu_index,
-            user=p.user,
-            text=(f"{p.user} is using GPU {p.gpu_index} ({_mib(p.used_mib)}), "
-                  f"which is assigned to {assignee}."),
-        ))
-    return out
+        held[(p.user, p.gpu_index)] = held.get((p.user, p.gpu_index), 0) + p.used_mib
+    return [Alert(
+        kind="allocation",
+        key=f"allocation:{user}:{gpu}",    # not the PID: one incident
+        gpu_index=gpu,
+        user=user,
+        text=(f"{user} is using GPU {gpu} ({_mib(mib)}), "
+              f"which is assigned to {pol.owner_of_gpu(gpu)}."),
+    ) for (user, gpu), mib in held.items()]
 
 
 def check_unattributed(snap: Snapshot, pol: Policy) -> list[Alert]:
-    """A holder whose owner could not be resolved, on a GPU that has an assignee.
+    """Holders whose owner could not be resolved, on a GPU that has an assignee.
 
+    One alert per GPU, summing the processes that each hold at least idle_min_mib.
     Says so rather than staying silent or guessing; deliberately non-accusing.
     """
-    out = []
+    held: dict[int, int] = {}
     for p in snap.procs:
         if p.user is not None or p.used_mib < pol.idle_min_mib:
             continue
-        assignee = pol.owner_of_gpu(p.gpu_index)
-        if assignee is None:
+        if pol.owner_of_gpu(p.gpu_index) is None:
             continue
-        out.append(Alert(
-            kind="unattributed",
-            key=f"unattributed:{p.gpu_index}",
-            gpu_index=p.gpu_index,
-            user=None,
-            text=(f"An unattributed process is holding {_mib(p.used_mib)} on GPU "
-                  f"{p.gpu_index} (assigned to {assignee}); its owner could not be "
-                  f"resolved."),
-        ))
-    return out
+        held[p.gpu_index] = held.get(p.gpu_index, 0) + p.used_mib
+    return [Alert(
+        kind="unattributed",
+        key=f"unattributed:{gpu}",
+        gpu_index=gpu,
+        user=None,
+        text=(f"An unattributed process is holding {_mib(mib)} on GPU "
+              f"{gpu} (assigned to {pol.owner_of_gpu(gpu)}); its owner could not be "
+              f"resolved."),
+    ) for gpu, mib in held.items()]
 
 
 def check_capacity(snap: Snapshot, pol: Policy) -> list[Alert]:

@@ -107,3 +107,27 @@ def test_unattributed_ignores_small_attributed_and_unassigned():
                   GpuProcess(3, 1, 5000, None)])      # GPU has no assignee
 
     assert check_unattributed(snap, pol) == []
+
+
+def test_two_processes_of_one_user_on_one_gpu_are_one_allocation_alert():
+    """The live 2026-10-06 case: dorian's job plus a helper on GPU 7 showed twice."""
+    from resourcemonitor.rules import check_allocation as alloc
+    snap = _snap([GpuState(7, 81559, 37069, 98)],
+                 [GpuProcess(10, 7, 27358, "dorian.zwanzig"),
+                  GpuProcess(11, 7, 9702, "dorian.zwanzig")])
+
+    (a,) = alloc(snap, POL)
+
+    assert a.key == "allocation:dorian.zwanzig:7"
+    assert "GPU 7 (36.2 GiB)" in a.text                  # 27358 + 9702 MiB, summed
+
+
+def test_two_unattributed_processes_on_one_gpu_are_one_alert():
+    from resourcemonitor.rules import check_unattributed
+    snap = _snap([GpuState(4, 81559, 6144, 0)],
+                 [GpuProcess(20, 4, 2048, None), GpuProcess(21, 4, 4096, None)])
+
+    (a,) = check_unattributed(snap, POL)
+
+    assert a.key == "unattributed:4"
+    assert "holding 6.0 GiB on GPU 4" in a.text
