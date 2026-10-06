@@ -297,6 +297,20 @@
     return fmtTime(d);
   }
 
+  // Greedy sub-lanes for one GPU row: each job goes in the first lane whose last end
+  // is <= its start. jobs: [{start, end}] in ms. Returns {lane: [index per job], count}.
+  function packLanes(jobs) {
+    const order = jobs.map((_, i) => i).sort((a, b) => jobs[a].start - jobs[b].start || a - b);
+    const laneEnds = [], lane = new Array(jobs.length);
+    for (const i of order) {
+      let k = laneEnds.findIndex((end) => end <= jobs[i].start);
+      if (k < 0) { k = laneEnds.length; laneEnds.push(0); }
+      laneEnds[k] = jobs[i].end;
+      lane[i] = k;
+    }
+    return { lane: lane, count: Math.max(1, laneEnds.length) };
+  }
+
   function renderTimeline() {
     const wrap = $("timeline-chart"), legend = $("timeline-legend");
     const d = state.timeline;
@@ -304,23 +318,36 @@
     clear(wrap); clear(legend);
     const gpuIds = new Set(Object.keys(d.gpus).map(Number));
     if (state.now) for (const g of state.now.gpus) gpuIds.add(g.gpu);
-    const rows = Array.from(gpuIds).sort((a, b) => a - b);
 
     const W = Math.max(640, wrap.clientWidth || 0);
-    const labelW = 190, padR = 18, axisH = 22, rowH = 32, barH = 22;
-    const H = axisH + rows.length * rowH + 6;
+    const labelW = 190, padR = 18, axisH = 22, barH = 22, laneGap = 4, rowPad = 5;
     const t0 = new Date(d.from).getTime(), t1 = new Date(d.to).getTime();
+    // A stopped monitor cannot vouch for "still running": ongoing bars end at its last poll.
+    const stale = Boolean(state.now && state.now.stale);
+    const liveEnd = stale ? Math.min(t1, new Date(state.now.ts).getTime()) : t1;
+    const endOf = (job) => (job.ongoing ? liveEnd : new Date(job.end).getTime());
+
+    // One row per GPU, as many lanes as it has concurrent jobs (one lane = the old row).
+    let rowY = axisH;
+    const rows = Array.from(gpuIds).sort((a, b) => a - b).map((gpu) => {
+      const jobs = d.gpus[String(gpu)] || [];
+      const packed = packLanes(jobs.map((j) => ({ start: new Date(j.start).getTime(), end: endOf(j) })));
+      const h = 2 * rowPad + packed.count * barH + (packed.count - 1) * laneGap;
+      const row = { gpu: gpu, jobs: jobs, lane: packed.lane, y: rowY, h: h };
+      rowY += h;
+      return row;
+    });
+    const H = rowY + 6;
     const plotW = W - labelW - padR;
     const x = (t) => labelW + ((Math.min(Math.max(t, t0), t1) - t0) / (t1 - t0)) * plotW;
 
     const chart = svg("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img" });
     addTitle(chart, "Timeline of GPU jobs, last " + state.timelineHours + " h");
 
-    rows.forEach((gpu, i) => {
-      const y = axisH + i * rowH;
-      if (i % 2 === 0) chart.appendChild(svg("rect", { x: 0, y: y, width: W, height: rowH }, "row-band"));
-      chart.appendChild(svgText(8, y + rowH / 2 - 2, "GPU " + gpu, "row-label"));
-      chart.appendChild(svgText(8, y + rowH / 2 + 11, "assigned to " + (assigneeOf(gpu) || "—"), "row-sub"));
+    rows.forEach((r, i) => {
+      if (i % 2 === 0) chart.appendChild(svg("rect", { x: 0, y: r.y, width: W, height: r.h }, "row-band"));
+      chart.appendChild(svgText(8, r.y + 14, "GPU " + r.gpu, "row-label"));
+      chart.appendChild(svgText(8, r.y + 27, "assigned to " + (assigneeOf(r.gpu) || "—"), "row-sub"));
     });
 
     const nowX = x(t1);
@@ -333,13 +360,14 @@
 
     const usersSeen = new Set();
     let anyUnatt = false, anyOutside = false, anyJob = false;
-    rows.forEach((gpu, i) => {
-      const y = axisH + i * rowH + (rowH - barH) / 2;
+    for (const r of rows) {
+      const gpu = r.gpu;
       const assignee = assigneeOf(gpu);
-      for (const job of d.gpus[String(gpu)] || []) {
+      r.jobs.forEach((job, ji) => {
         anyJob = true;
+        const y = r.y + rowPad + r.lane[ji] * (barH + laneGap);
         const s = new Date(job.start).getTime();
-        const e = job.ongoing ? t1 : new Date(job.end).getTime();
+        const e = endOf(job);
         const x1 = x(s), w = Math.max(2, x(e) - x1);
         const cls = colourClass(job.user);
         const outside = isOutside(job.user, assignee);
@@ -349,7 +377,7 @@
         const rect = svg("rect", { x: x1, y: y, width: w, height: barH, rx: 3 },
           "job " + cls + (outside ? " outside" : ""));
         g.appendChild(rect);
-        if (job.ongoing) {
+        if (job.ongoing && !stale) {
           const tipX = x1 + w;
           g.appendChild(svg("polygon", {
             points: tipX + "," + y + " " + (tipX + 7) + "," + (y + barH / 2) + " " + tipX + "," + (y + barH),
@@ -363,20 +391,22 @@
           g.appendChild(svgText(x1 + 5, y + barH / 2 + 4, label,
             "bar-label" + (job.user === null ? " on-unatt unattributed" : "")));
         }
-        const endTxt = job.ongoing ? "now (ongoing)" : fmtLocal(new Date(job.end));
+        const endTxt = !job.ongoing ? fmtLocal(new Date(job.end))
+          : stale ? fmtLocal(new Date(liveEnd)) + " (last poll; monitor not running since)"
+          : "now (ongoing)";
         addTitle(g, [
           job.user === null ? "unattributed" : job.user,
           "what: " + (job.name || "unknown"),
           "pid " + job.pid + " on GPU " + gpu + (outside ? " — outside allocation (assigned to " + assignee + ")" : ""),
           fmtLocal(new Date(job.start)) + " – " + endTxt,
-          "duration " + fmtDuration(((job.ongoing ? t1 : new Date(job.end).getTime()) - s) / 1000),
+          "duration " + fmtDuration((e - s) / 1000),
           "peak VRAM " + fmtGiB(job.max_mib) + " (" + job.max_mib.toLocaleString() + " MiB)",
         ].join("\n"));
         chart.appendChild(g);
-      }
-    });
+      });
+    }
     if (!anyJob) {
-      chart.appendChild(svgText(labelW + plotW / 2, axisH + (rows.length * rowH) / 2, "No GPU jobs in this range", "empty-note", "middle"));
+      chart.appendChild(svgText(labelW + plotW / 2, (axisH + rowY) / 2, "No GPU jobs in this range", "empty-note", "middle"));
     }
 
     chart.appendChild(svg("line", { x1: nowX, x2: nowX, y1: axisH - 6, y2: H - 2 }, "now-line"));

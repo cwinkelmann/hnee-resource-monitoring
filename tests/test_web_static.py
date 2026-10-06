@@ -41,3 +41,37 @@ def test_favicon_is_linked_and_self_contained():
     # the SVG namespace is a name, never fetched; nothing else may point outside
     rest = svg.replace('xmlns="http://www.w3.org/2000/svg"', "", 1)
     assert re.search(r"https?://|href=|<image|<script|@import", rest) is None
+
+
+def _run_js_function(name, call):
+    """Extract a top-level helper from app.js and evaluate `call` with node (skip without)."""
+    import json, shutil, subprocess
+    import pytest
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = (WEB / "app.js").read_text()
+    m = re.search(r"^  function " + name + r"\(.*?^  \}$", js, re.S | re.M)
+    assert m, f"{name} not found in app.js"
+    out = subprocess.run([node, "-e", m.group(0) + "\nconsole.log(JSON.stringify(" + call + "));"],
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_pack_lanes_puts_concurrent_jobs_on_separate_lanes():
+    # GPU 7 on the live box: a job and its helper over the same span, then a later job
+    r = _run_js_function("packLanes", "packLanes([{start: 0, end: 10}, {start: 0, end: 10},"
+                                      " {start: 10, end: 20}, {start: 5, end: 7}])")
+    assert r == {"lane": [0, 1, 0, 2], "count": 3}
+
+
+def test_pack_lanes_keeps_sequential_jobs_on_one_lane_and_never_returns_zero_lanes():
+    assert _run_js_function("packLanes", "packLanes([{start: 0, end: 5}, {start: 6, end: 9}])") \
+        == {"lane": [0, 0], "count": 1}
+    assert _run_js_function("packLanes", "packLanes([])") == {"lane": [], "count": 1}
+
+
+def test_timeline_ends_ongoing_bars_at_the_last_poll_when_stale():
+    js = (WEB / "app.js").read_text()
+    assert "state.now.stale" in js and "liveEnd" in js
