@@ -1,3 +1,56 @@
+# CLAUDE.md — ResourceMonitor
+
+A read-only watcher for the shared GPU box. It attributes GPU occupancy and electricity
+to users and posts to Slack.
+
+## The box
+
+`ssh cwinkelmann@10.188.1.1` — **the name "carrot" does not resolve in DNS, use the IP.**
+Key-based auth, no password. 8 × H100 80GB HBM3, shared with `dorian.zwanzig` (UID 1053);
+the split is dorian 0–3, cwinkelmann 4–7.
+
+Run it with `/usr/bin/python3` (3.12.3). conda is deliberately not used and is not on
+`PATH` over non-interactive ssh — the tool is stdlib-only so it keeps working when envs
+come and go.
+
+## Non-negotiables
+
+- **It never kills, signals or reprioritises anything.** Observation only. If a change
+  would add a write path to another user's process, it does not belong here.
+- **It runs on the host, outside Docker.** A rootless container rewrites every foreign
+  UID to 65534, so attribution silently becomes `nobody`. Verified 2026-10-06; see the
+  plan's Measured facts. Do not "containerise it for consistency".
+- **Stdlib only.** No requests, no pynvml, no venv — it must survive a shared box with
+  no maintenance.
+- **Dry-run is the default.** `--post` is opt-in.
+- **The Slack webhook is a bearer credential.** It lives in `~/.config/resourcemonitor/env`
+  at mode 0600, is read from the environment, and never appears in a log, a repr or a
+  traceback.
+
+## Layout
+
+`probe.py` is the only module that shells out. Everything else is a pure function of a
+`Snapshot`, which is why the rules are testable on a laptop with no GPU. Keep that seam.
+
+## Energy numbers are estimates
+
+This driver has no `total_energy_consumption` counter, so energy is `Σ power × Δt` over
+the tool's own polls: it measures **only while the service was running**. `power.draw` is
+per card, so when several processes share a GPU the split is by memory share — a proxy.
+Any report that states a kWh figure must also state both caveats.
+
+## The GPU split
+
+dorian 0–3, cwinkelmann 4–7 (agreed 2026-08-19). It lives in
+`~/.config/resourcemonitor/policy.toml`, not in code.
+
+## Skills
+
+- `deploy-resourcemonitor` — install or update the service on carrot
+- `gpu-energy-report` — produce a per-user energy and occupancy report
+
+---
+
 # context-mode — MANDATORY routing rules
 
 You have context-mode MCP tools available. These rules are NOT optional — they protect your context window from flooding. A single unrouted command can dump 56 KB into context and waste the entire session.
