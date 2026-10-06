@@ -33,6 +33,7 @@ actionable number in the report: it is the cost of cards nobody is using.
 
 ## Sanity checks before sending a report
 
-- Does `per_gpu` sum to roughly `per_user + idle`? A large gap means unattributed
-  processes — check for `None` owners.
+- Does the all-cards total roughly equal `per_user + idle + unattributed`? The report
+  prints all three plus the total. A large `unattributed` share means owners could not
+  be resolved (e.g. rootless-container processes) — check for `None` owners.
 - Is `since` when you think the service started? If it is more recent, it restarted.

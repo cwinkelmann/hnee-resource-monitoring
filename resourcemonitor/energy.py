@@ -5,6 +5,7 @@ Everything here is an estimate with a stated shape:
   * per user  -- power is per CARD, so several processes on one card are split by
                  memory share. That is a proxy, not a measurement, and the report says so.
   * idle      -- power drawn by a card with no compute process on it. Nobody is billed.
+  * unattributed -- a holder whose owner could not be resolved; kept apart, never guessed.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ class EnergyLedger:
     per_gpu_kwh: dict[int, float] = field(default_factory=dict)
     per_user_kwh: dict[str, float] = field(default_factory=dict)
     idle_kwh: float = 0.0
+    unattributed_kwh: float = 0.0
     since: str | None = None
     _last: Snapshot | None = field(default=None, repr=False)  # type: ignore[name-defined]
 
@@ -47,14 +49,16 @@ class EnergyLedger:
                 continue
             total_mib = sum(max(p.used_mib, 1) for p in holders)
             for p in holders:
-                if p.user is None:
-                    continue                        # unattributed: do not bill a guess
                 share = max(p.used_mib, 1) / total_mib
+                if p.user is None:                  # unattributed: do not bill a guess,
+                    self.unattributed_kwh += kwh * share   # but do not lose it either
+                    continue
                 self.per_user_kwh[p.user] = self.per_user_kwh.get(p.user, 0.0) + kwh * share
 
     def totals(self) -> dict:
         return {"per_gpu": dict(self.per_gpu_kwh), "per_user": dict(self.per_user_kwh),
-                "idle_kwh": self.idle_kwh, "since": self.since}
+                "idle_kwh": self.idle_kwh,
+                "unattributed_kwh": self.unattributed_kwh, "since": self.since}
 
     @classmethod
     def load(cls, path: Path | str, max_gap_s: int = 300) -> "EnergyLedger":
@@ -63,6 +67,7 @@ class EnergyLedger:
         except (FileNotFoundError, json.JSONDecodeError):
             return cls(max_gap_s=max_gap_s)
         led = cls(max_gap_s=max_gap_s, idle_kwh=d.get("idle_kwh", 0.0),
+                  unattributed_kwh=d.get("unattributed_kwh", 0.0),
                   since=d.get("since"))
         led.per_gpu_kwh = {int(k): v for k, v in d.get("per_gpu", {}).items()}
         led.per_user_kwh = dict(d.get("per_user", {}))
@@ -85,6 +90,11 @@ def format_report(totals: dict, price_per_kwh: float) -> str:
         lines.append(f"• {user}: {kwh:.1f} kWh  (~€{kwh * price_per_kwh:.2f})")
     idle = totals["idle_kwh"]
     lines.append(f"• _idle cards (nobody): {idle:.1f} kWh (~€{idle * price_per_kwh:.2f})_")
+    unattr = totals.get("unattributed_kwh", 0.0)
+    lines.append(f"• _unattributed (owner unknown): {unattr:.1f} kWh "
+                 f"(~€{unattr * price_per_kwh:.2f})_")
+    gpu_total = sum(totals.get("per_gpu", {}).values())
+    lines.append(f"• _all cards total: {gpu_total:.1f} kWh (~€{gpu_total * price_per_kwh:.2f})_")
     lines.append("")
     lines.append("Per-user figures split a card's draw by memory share when several "
                  "processes share it — an estimate, not a measurement.")
