@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import pwd
+import re
 import subprocess
 from datetime import datetime, timezone
 
 from resourcemonitor.model import GpuProcess, GpuState, Snapshot
 
 GPU_FIELDS = "index,uuid,memory.total,memory.used,utilization.gpu,power.draw"
-APP_FIELDS = "gpu_uuid,pid,used_memory"
+APP_FIELDS = "gpu_uuid,pid,used_memory,process_name"
 
 
 def _num(cell: str) -> int:
@@ -57,10 +59,14 @@ def parse_apps_query(text: str, uuid_to_index: dict[str, int]) -> tuple[GpuProce
     for line in text.strip().splitlines():
         if not line.strip():
             continue
-        uuid, pid, used = [c.strip() for c in line.split(",")]
+        # maxsplit: a process path may itself contain commas. 3-field legacy lines still work.
+        cells = [c.strip() for c in line.split(",", 3)]
+        uuid, pid, used = cells[:3]
+        raw_name = cells[3] if len(cells) > 3 else ""
+        name = None if raw_name in ("", "[N/A]") else raw_name
         if uuid not in uuid_to_index:
             continue          # a GPU we did not enumerate; drop rather than guess
-        out.append(GpuProcess(int(pid), uuid_to_index[uuid], _num(used)))
+        out.append(GpuProcess(int(pid), uuid_to_index[uuid], _num(used), None, name))
     return tuple(out)
 
 
@@ -119,11 +125,48 @@ def owner_of(pid: int) -> str | None:
     return _name_of_uid(uid)
 
 
+def cmdline_of(pid: int) -> list[str] | None:
+    """argv of `pid` from /proc, or None if it cannot be read (exited, no permission)."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return None
+    return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a] or None
+
+
+_PYTHON = re.compile(r"python(3(\.\d+)?)?")
+_LABEL_MAX = 60
+
+
+def label_for(name: str | None, cmdline: list[str] | None) -> str | None:
+    """Short, safe label of WHAT a process is.
+
+    The page is unauthenticated on the LAN and arguments can carry tokens, paths or data
+    names, so the label may contain only: the interpreter word, `-m <module>`, a script
+    basename, or the basename of the nvidia-smi process name. Never any other argument.
+    """
+    label: str | None = None
+    if cmdline and _PYTHON.fullmatch(posixpath.basename(cmdline[0])):
+        args = cmdline[1:]
+        if "-m" in args and args.index("-m") + 1 < len(args):
+            label = f"python -m {args[args.index('-m') + 1]}"
+        else:
+            script = next((a for a in args if a.endswith(".py")), None)
+            label = f"python {posixpath.basename(script)}" if script else "python"
+    elif name:
+        label = posixpath.basename(name) or None
+    elif cmdline:
+        label = posixpath.basename(cmdline[0]) or None
+    return label[:_LABEL_MAX] if label else None
+
+
 def probe() -> Snapshot:
     gpu_text = _run(GPU_FIELDS, "gpu")
     apps_text = _run(APP_FIELDS, "compute-apps")
     procs = tuple(
-        GpuProcess(p.pid, p.gpu_index, p.used_mib, owner_of(p.pid))
+        GpuProcess(p.pid, p.gpu_index, p.used_mib, owner_of(p.pid),
+                   label_for(p.name, cmdline_of(p.pid)))
         for p in parse_apps_query(apps_text, parse_gpu_uuids(gpu_text))
     )
     return Snapshot(

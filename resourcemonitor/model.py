@@ -20,6 +20,7 @@ class GpuProcess:
     gpu_index: int
     used_mib: int
     user: str | None = None      # None == could not resolve; render as "unattributed"
+    name: str | None = None      # short label of WHAT runs; never a full command line
 
 
 @dataclass(frozen=True)

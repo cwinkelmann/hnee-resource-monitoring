@@ -97,3 +97,42 @@ def test_uid_is_parsed_from_the_status_uid_line():
     assert _parse_status_uid(status) == 1053
     assert _parse_status_uid("Name:\tx\n") is None
     assert _parse_status_uid("Uid:\tabc\n") is None
+
+
+from resourcemonitor.probe import label_for
+
+
+def test_apps_query_reads_the_process_name_column():
+    procs = parse_apps_query("GPU-ggg, 3578603, 77014 MiB, VLLM::Worker_TP0\n", {"GPU-ggg": 0})
+    assert procs[0].name == "VLLM::Worker_TP0" and procs[0].used_mib == 77014
+
+
+def test_apps_query_still_accepts_the_three_column_format():
+    procs = parse_apps_query("GPU-ggg, 3078913, 22706 MiB\n", {"GPU-ggg": 6})
+    assert procs[0].name is None and procs[0].pid == 3078913
+
+
+def test_a_comma_in_the_process_path_does_not_break_parsing():
+    procs = parse_apps_query("GPU-ggg, 7, 10 MiB, /opt/a,b/python\n", {"GPU-ggg": 1})
+    assert procs[0].name == "/opt/a,b/python"
+
+
+def test_label_shows_the_python_script_but_no_arguments():
+    cmd = ["/opt/kev/.venv/bin/python", "/app/scripts/kev_run.py", "_train_epochs",
+           "--token", "SECRET123", "--batch", "8"]
+    assert label_for("/opt/kev/.venv/bin/python", cmd) == "python kev_run.py"
+
+
+def test_label_shows_python_module():
+    assert label_for("python", ["python3.12", "-m", "vllm.entrypoints.openai.api_server",
+                                "--api-key", "SECRET"]) == "python -m vllm.entrypoints.openai.api_server"
+
+
+def test_label_falls_back_to_the_nvidia_process_name():
+    assert label_for("VLLM::Worker_TP0", ["VLLM::Worker_TP0"]) == "VLLM::Worker_TP0"
+    assert label_for("/usr/bin/blender", None) == "blender"
+    assert label_for(None, None) is None
+
+
+def test_label_is_capped_at_60_chars():
+    assert len(label_for("x" * 200, None)) == 60

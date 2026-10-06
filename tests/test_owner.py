@@ -38,3 +38,8 @@ def test_the_overflow_uid_is_never_resolved_to_a_name(monkeypatch):
     monkeypatch.setattr(probe, "_uid_of", lambda pid: 65534)
 
     assert probe.owner_of(1234) is None
+
+
+def test_cmdline_of_a_dead_pid_is_none():
+    from resourcemonitor.probe import cmdline_of
+    assert cmdline_of(2 ** 22) is None
