@@ -167,3 +167,14 @@ def test_cli_serve_delegates_to_the_web_entry_point(monkeypatch):
                      "--history", "/x/h.sqlite", "--policy", "/x/p.toml"]) == 0
     assert seen == [["--bind", "10.188.1.1", "--port", "9", "--history", "/x/h.sqlite",
                      "--policy", "/x/p.toml", "--stale-after", "5"]]
+
+
+def test_favicon_svg_is_served_and_favicon_ico_is_204(live):
+    status, headers, body = _get(live + "/favicon.svg")
+    assert status == 200 and headers["Content-Type"].startswith("image/svg+xml")
+    assert body.lstrip().startswith(b"<svg")
+    status, headers, body = _get(live + "/favicon.ico")
+    assert status == 204 and body == b""
+    for h in (headers,):
+        assert h["Content-Security-Policy"] == "default-src 'self'"
+        assert h["X-Content-Type-Options"] == "nosniff"

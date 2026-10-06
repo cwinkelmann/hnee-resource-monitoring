@@ -32,3 +32,12 @@ def test_dry_run_slack_line_is_on_the_page_and_per_alert_status_only_when_postin
     assert "Slack posting is off (dry run) — alerts are shown here only." in html
     js = (WEB / "app.js").read_text()
     assert 'd.slack !== "dry-run"' in js and 'd.slack === "posting"' in js
+
+
+def test_favicon_is_linked_and_self_contained():
+    html = (WEB / "index.html").read_text()
+    assert '<link rel="icon" href="/favicon.svg"' in html
+    svg = (WEB / "favicon.svg").read_text()
+    # the SVG namespace is a name, never fetched; nothing else may point outside
+    rest = svg.replace('xmlns="http://www.w3.org/2000/svg"', "", 1)
+    assert re.search(r"https?://|href=|<image|<script|@import", rest) is None

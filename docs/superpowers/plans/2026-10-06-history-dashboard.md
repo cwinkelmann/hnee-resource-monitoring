@@ -20,7 +20,7 @@
 - **Reserved bucket names:** `"(idle)"` and `"(unattributed)"`. Parentheses cannot occur in Linux usernames, so these can never collide with a user.
 - **Timestamps:** UTC ISO-8601 strings from `snap.taken_at.isoformat()`. Day and week grouping uses **UTC days**, and ISO weeks start Monday. The page labels this "UTC".
 - **No auth.** This was the user's explicit choice; the page is visible to the LAN. Bind defaults to `127.0.0.1`; the deployed unit passes `--bind 10.188.1.1 --port 8765`.
-- **Fixed routes only.** `/`, `/app.js`, `/app.css`, `/api/now`, `/api/usage`, `/api/timeseries`, `/api/timeline`, `/healthz`. GET only: any other method gets 405, any other path gets 404. Request input is never used as a file path.
+- **Fixed routes only.** `/`, `/app.js`, `/app.css`, `/favicon.svg`, `/api/now`, `/api/usage`, `/api/timeseries`, `/api/timeline`, `/healthz`, plus `/favicon.ico` answered with 204 No Content. GET only: any other method gets 405, any other path gets 404. Request input is never used as a file path.
 - **Response headers on every response:** `Content-Security-Policy: default-src 'self'` and `X-Content-Type-Options: nosniff`. No CORS headers. Because of the CSP, **no inline `<script>` or `<style>`** may appear in index.html.
 - **Bad query parameters get a 400** with body `{"error": "bad request"}`, never a traceback. Ranges are capped: `/api/usage` needs `from <= to` and spans at most 366 days; `/api/timeseries` `hours` must be in 1..168.
 - **No per-request access logging.** Override `log_message` to stay silent. Errors are printed by exception class only.

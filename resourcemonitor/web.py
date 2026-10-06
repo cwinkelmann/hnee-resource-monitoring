@@ -21,6 +21,7 @@ STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 MAX_USAGE_DAYS = 366
 
@@ -71,7 +72,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, body: bytes, ctype: str) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        if status != 204:                    # a 204 carries no body and no length
+            self.send_header("Content-Length", str(len(body)))
         self.send_header("Content-Security-Policy", "default-src 'self'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
@@ -94,6 +96,9 @@ class _Handler(BaseHTTPRequestHandler):
             if path in STATIC:
                 name, ctype = STATIC[path]
                 self._send(200, (WEB_DIR / name).read_bytes(), ctype)
+                return
+            if path == "/favicon.ico":       # browsers ask regardless; the page links the SVG
+                self._send(204, b"", "text/plain")
                 return
             handler = {"/api/now": self._now, "/api/usage": self._usage,
                        "/api/timeseries": self._timeseries, "/api/timeline": self._timeline,
