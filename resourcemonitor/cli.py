@@ -53,6 +53,8 @@ def main(argv=None) -> int:
     url = os.environ.get("SLACK_WEBHOOK_URL", "")
     if args.post and not url:
         raise SystemExit("--post given but SLACK_WEBHOOK_URL is not set")
+    if args.post and not url.startswith("https://"):
+        raise SystemExit("SLACK_WEBHOOK_URL must start with https://")
     notifier = Notifier(url, dry_run=not args.post)
     tracker = IdleTracker()
     ledger = EnergyLedger.load(args.energy, max_gap_s=args.interval * 5)
@@ -76,5 +78,6 @@ def main(argv=None) -> int:
         try:
             run_once(pol, state, notifier, tracker, ledger, host, args.energy)
         except Exception as e:       # a bad poll must not end the service
-            print(f"poll failed: {e.__class__.__name__}: {e}", flush=True)
+            # class name only: the message may embed the webhook URL
+            print(f"poll failed: {e.__class__.__name__}", flush=True)
         time.sleep(args.interval)
