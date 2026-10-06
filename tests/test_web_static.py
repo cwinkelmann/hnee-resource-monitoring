@@ -27,7 +27,7 @@ def test_page_has_the_three_sections_and_caveat_slot():
     html = (WEB / "index.html").read_text()
     for id_ in ("now", "timeline", "usage", "timeseries", "caveats", "stale-banner",
                 "bookings", "book-form", "book-error", "booking-calendar", "booking-detail",
-                "booking-changes"):
+                "booking-changes", "vram24", "vram-grid", "vram-legend"):
         assert f'id="{id_}"' in html
 
 
@@ -145,3 +145,25 @@ def test_holder_hint_says_booked_only_when_calendar_bookings_cover_the_card(book
     r = _run_js_function("holderHint", "(" + "function(){" + holder_of
                          + "; return holderHint(holderOf(" + g + "));})()")
     assert r == hint
+
+
+def test_vram_panel_follows_the_power_panel_and_fetches_its_route():
+    html = (WEB / "index.html").read_text()
+    assert "<h2>Power &amp; utilisation — last 24 h</h2>" in html
+    assert html.index('id="timeseries"') < html.index('id="vram24"')
+    assert "<h2>VRAM — last 24 h</h2>" in html
+    assert "stacked by user (0–80 GiB) · dashed = booked share" in html
+    js = (WEB / "app.js").read_text()
+    assert '"/api/vram?hours=24"' in js
+    assert "setInterval(loadVram, 300000)" in js
+
+
+def test_vram_stacking_and_booked_share_helpers():
+    import shutil, subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    out = subprocess.run([node, "tests/js/test_vram_stack.mjs"], capture_output=True, text=True,
+                         timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert "ok" in out.stdout

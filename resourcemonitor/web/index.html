@@ -112,8 +112,14 @@
   </section>
 
   <section id="timeseries" class="panel">
-    <div class="panel-head"><h2>Last 24 h</h2><span class="hint">power (line, 0–700 W) · utilisation (shaded)</span></div>
+    <div class="panel-head"><h2>Power &amp; utilisation — last 24 h</h2><span class="hint">power (line, 0–700 W) · utilisation (shaded)</span></div>
     <div id="spark-grid" class="spark-grid"></div>
+  </section>
+
+  <section id="vram24" class="panel">
+    <div class="panel-head"><h2>VRAM — last 24 h</h2><span class="hint">stacked by user (0–80 GiB) · dashed = booked share</span></div>
+    <div id="vram-grid" class="spark-grid"></div>
+    <div id="vram-legend" class="legend"></div>
   </section>
 </main>
 <script src="/app.js"></script>

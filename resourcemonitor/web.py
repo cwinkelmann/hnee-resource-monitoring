@@ -23,7 +23,8 @@ from resourcemonitor.claims import (DEFAULT_CARD_MIB, DEFAULT_CLAIMS, GPU_COUNT,
                                     ClaimError, ClaimsStore, PwdUsers, UserDirectory,
                                     list_window_ro, load_active, parse_time)
 from resourcemonitor.paths import DEFAULT_HISTORY, DEFAULT_POLICY
-from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timeseries, usage
+from resourcemonitor.queries import (NoHistory, latest, open_ro, timeline, timeseries, usage,
+                                     vram_timeseries)
 
 WEB_DIR = Path(__file__).parent / "web"
 STATIC = {
@@ -35,7 +36,7 @@ STATIC = {
 MAX_USAGE_DAYS = 366
 # The scan-heavy endpoints share two slots, so a burst of page loads cannot pile up
 # SQLite scans on the shared box; a request that waits longer than this gets 503 busy.
-_HEAVY = frozenset({"/api/timeline", "/api/usage", "/api/timeseries"})
+_HEAVY = frozenset({"/api/timeline", "/api/usage", "/api/timeseries", "/api/vram"})
 _QUERY_SLOTS = threading.BoundedSemaphore(2)
 _BUSY_WAIT_S = 2
 
@@ -44,7 +45,7 @@ _DRAIN_MAX = 64 * 1024                          # unread body bytes swallowed be
 _DRAIN_TIMEOUT_S = 1
 _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
-                                 "/api/timeline", "/api/users", "/healthz"}
+                                 "/api/vram", "/api/timeline", "/api/users", "/healthz"}
 _CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note")
 _QUICK = "/api/claims/quick"
 _QUICK_FIELDS = ("user", "gpu")
@@ -178,7 +179,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(204, b"", "text/plain")
                 return
             handler = {"/api/now": self._now, "/api/usage": self._usage,
-                       "/api/timeseries": self._timeseries, "/api/timeline": self._timeline,
+                       "/api/timeseries": self._timeseries, "/api/vram": self._vram,
+                       "/api/timeline": self._timeline,
                        "/api/claims": self._claims, "/api/users": self._users,
                        "/healthz": self._healthz}.get(path)
             if handler is None:
@@ -411,6 +413,18 @@ class _Handler(BaseHTTPRequestHandler):
         conn = self._conn()
         try:
             data = timeseries(conn, hours, self.server.clock())
+        finally:
+            conn.close()
+        self._json(200, data)
+
+    def _vram(self, query: str) -> None:
+        p = _params(query, {"hours"})
+        if len(p.get("hours", "")) > 3:
+            raise BadRequest("hours")
+        hours = _hours(p, 24, 168)
+        conn = self._conn()
+        try:
+            data = vram_timeseries(conn, hours, self.server.clock())
         finally:
             conn.close()
         self._json(200, data)

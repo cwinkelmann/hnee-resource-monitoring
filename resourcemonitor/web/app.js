@@ -46,7 +46,53 @@ function makeDebouncer(delayMs, deliver, schedule, cancel) {
     pending(key) { return pending.has(key); },
   };
 }
-if (typeof module !== "undefined") module.exports = { freeVramMiB, makeDebouncer };
+// VRAM panel stacking order: users alphabetically, "(unattributed)" last; only buckets that
+// held some VRAM in `points` ([{by_user: {bucket: mib}}]).
+function vramBucketOrder(points) {
+  const seen = new Set();
+  for (const p of points) for (const b in p.by_user) if (p.by_user[b] > 0) seen.add(b);
+  const unatt = "(unattributed)";
+  const users = Array.from(seen).filter((b) => b !== unatt).sort();
+  return seen.has(unatt) ? users.concat([unatt]) : users;
+}
+
+// Stacked bands, bottom-up in `order`: per bucket, its lower and upper edge at every point
+// (a bucket missing from a point counts as 0).
+function stackSeries(points, order) {
+  const base = points.map(() => 0);
+  return order.map((bucket) => {
+    const lower = base.slice();
+    const upper = points.map((p, i) => (base[i] += p.by_user[bucket] || 0));
+    return { bucket: bucket, lower: lower, upper: upper };
+  });
+}
+
+// Booked share on `gpu` over [t0, t1] as a step line [{t, mib}]: the sum of the claims active
+// from each point on (a claim holds from its start, inclusive, to its end or cancellation,
+// exclusive). [] when no claim on that GPU touches the window.
+function bookedSteps(claims, gpu, t0, t1) {
+  const live = [];
+  for (const c of claims) {
+    if (c.gpu !== gpu) continue;
+    const s = Date.parse(c.start);
+    let e = Date.parse(c.end);
+    if (c.cancelled_at) e = Math.min(e, Date.parse(c.cancelled_at));
+    if (s < t1 && e > t0 && e > s) live.push({ s: s, e: e, mib: c.vram_mib });
+  }
+  if (!live.length) return [];
+  const times = new Set([t0]);
+  for (const c of live) for (const t of [c.s, c.e]) if (t > t0 && t < t1) times.add(t);
+  const steps = Array.from(times).sort((a, b) => a - b).map((t) => {
+    let mib = 0;
+    for (const c of live) if (c.s <= t && t < c.e) mib += c.mib;
+    return { t: t, mib: mib };
+  });
+  steps.push({ t: t1, mib: steps[steps.length - 1].mib });
+  return steps;
+}
+if (typeof module !== "undefined") {
+  module.exports = { freeVramMiB, makeDebouncer, vramBucketOrder, stackSeries, bookedSteps };
+}
 
 // Start-up only in a browser: Node loads this file for the tests above.
 if (typeof document !== "undefined") (function () {
@@ -72,6 +118,7 @@ if (typeof document !== "undefined") (function () {
 
   const state = {
     now: null, timeline: null, usage: null, timeseries: null,
+    vram: null,              // GET /api/vram?hours=24: VRAM per GPU, by user
     timelineHours: 24, usageDays: 7, usageBy: "day",
     users: [],               // sorted, every user ever seen this session
     inflight: 0, failed: new Set(),
@@ -305,7 +352,7 @@ if (typeof document !== "undefined") (function () {
     if (claims) state.timelineClaims = claims.claims;
     const names = state.timelineClaims.map((c) => c.user);
     for (const k in data.gpus) for (const j of data.gpus[k]) names.push(j.user);
-    if (registerUsers(names)) renderAll(); else renderTimeline();
+    if (registerUsers(names)) renderAll(); else { renderTimeline(); renderVram(); }   // claims feed both
   }
   async function loadClaims() {
     const data = await getJson("claims", "/api/claims");
@@ -360,8 +407,18 @@ if (typeof document !== "undefined") (function () {
     state.timeseries = data;
     renderTimeseries();
   }
+  async function loadVram() {
+    const data = await getJson("vram", "/api/vram?hours=24");
+    if (!data) return;                            // keep the last data; getJson shows why
+    state.vram = data;
+    const names = [];
+    for (const k in data.gpus) for (const p of data.gpus[k].points) names.push(...Object.keys(p.by_user));
+    if (registerUsers(names)) renderAll(); else renderVram();
+  }
 
-  function renderAll() { renderNow(); renderBookings(); renderTimeline(); renderUsage(); renderTimeseries(); }
+  function renderAll() {
+    renderNow(); renderBookings(); renderTimeline(); renderUsage(); renderTimeseries(); renderVram();
+  }
 
   // ---------- header + Now ----------
   function renderNow() {
@@ -1241,7 +1298,7 @@ if (typeof document !== "undefined") (function () {
     tbody.appendChild(tr);
   }
 
-  // ---------- Last 24 h sparklines ----------
+  // ---------- Power & utilisation — last 24 h sparklines ----------
   function renderTimeseries() {
     const grid = $("spark-grid");
     const d = state.timeseries;
@@ -1300,13 +1357,98 @@ if (typeof document !== "undefined") (function () {
     }
   }
 
+  // ---------- VRAM — last 24 h, stacked by user ----------
+  function bucketLabel(b) { return b === "(unattributed)" ? "unattributed" : b; }
+  function renderVram() {
+    const grid = $("vram-grid"), legend = $("vram-legend");
+    const d = state.vram;
+    if (!d) return;
+    clear(grid); clear(legend);
+    const t1 = state.now ? Math.max(Date.now(), new Date(state.now.ts).getTime()) : Date.now();
+    const t0 = t1 - DAY_MS;
+    const VW = 1000, VH = 100;
+    const x = (t) => (((Math.min(Math.max(t, t0), t1) - t0) / (t1 - t0)) * VW).toFixed(1);
+    const present = new Set();
+    let anyBooked = false;
+    for (const gpu of Object.keys(d.gpus).map(Number).sort((a, b) => a - b)) {
+      const g = d.gpus[String(gpu)];
+      const total = g.total_mib || DEFAULT_CARD_MIB;
+      const y = (mib) => (VH - (Math.min(mib, total) / total) * VH).toFixed(1);
+      const pts = g.points.map((p) => ({ t: new Date(p.ts).getTime(), gap: Boolean(p.gap), by_user: p.by_user }))
+        .filter((p) => p.t >= t0);
+      const order = vramBucketOrder(pts);
+      const bands = stackSeries(pts, order);
+      const sums = pts.map((p) => Object.values(p.by_user).reduce((a, v) => a + v, 0));
+
+      const box = el("div", "spark");
+      const head = el("div", "spark-head");
+      head.appendChild(el("b", "", "GPU " + gpu));
+      head.appendChild(el("span", "muted", pts.length
+        ? "peak " + fmtGiB(Math.max(...sums)) + " · now " + fmtGiB(sums[sums.length - 1]) : "no samples"));
+      box.appendChild(head);
+
+      const s = svg("svg", { viewBox: "0 0 " + VW + " " + VH, preserveAspectRatio: "none", role: "img" }, "vram-chart");
+      addTitle(s, "GPU " + gpu + ": VRAM by user (stacked) and booked share (dashed), last 24 h");
+      s.appendChild(svg("line", { x1: 0, x2: VW, y1: VH - 0.5, y2: VH - 0.5 }, "base"));
+      // Segments break at monitoring gaps, so no area bridges the downtime.
+      const segs = [];
+      pts.forEach((p, i) => { if (!segs.length || p.gap) segs.push([]); segs[segs.length - 1].push(i); });
+      for (const band of bands) {
+        let path = "";
+        for (const seg of segs) {
+          seg.forEach((i, k) => { path += (k ? "L" : "M") + x(pts[i].t) + "," + y(band.upper[i]); });
+          for (const i of seg.slice().reverse()) path += "L" + x(pts[i].t) + "," + y(band.lower[i]);
+          path += "Z";
+        }
+        const own = pts.map((_, i) => band.upper[i] - band.lower[i]);
+        const area = svg("path", { d: path }, "area " + colourClass(band.bucket));
+        addTitle(area, bucketLabel(band.bucket) + " — peak " + fmtGiB(Math.max(...own))
+          + ", now " + fmtGiB(own[own.length - 1]));
+        s.appendChild(area);
+        present.add(band.bucket);
+      }
+      const steps = bookedSteps(state.timelineClaims, gpu, t0, t1);
+      if (steps.length) {
+        anyBooked = true;
+        let line = "M" + x(steps[0].t) + "," + y(steps[0].mib);
+        for (let i = 1; i < steps.length; i++) line += "H" + x(steps[i].t) + "V" + y(steps[i].mib);
+        const booked = svg("path", { d: line }, "booked-share");
+        const peak = Math.max(...steps.map((st) => st.mib));
+        addTitle(booked, "booked share — peak " + fmtGiB(peak) + ", now " + fmtGiB(steps[steps.length - 1].mib));
+        s.appendChild(booked);
+      }
+      box.appendChild(s);
+
+      const foot = el("div", "spark-foot");
+      foot.appendChild(el("span", "", fmtTime(new Date(t0))));
+      foot.appendChild(el("span", "", "0–" + Math.round(total / 1024) + " GiB"));
+      foot.appendChild(el("span", "", fmtTime(new Date(t1))));
+      box.appendChild(foot);
+      grid.appendChild(box);
+    }
+
+    const legendOrder = Array.from(present).filter((b) => b !== "(unattributed)").sort();
+    if (present.has("(unattributed)")) legendOrder.push("(unattributed)");
+    for (const b of legendOrder) {
+      const item = el("span", "item");
+      item.appendChild(swatch(b));
+      item.appendChild(el("span", b === "(unattributed)" ? "unattributed" : "", bucketLabel(b)));
+      legend.appendChild(item);
+    }
+    if (anyBooked) {
+      const item = el("span", "item"); item.appendChild(el("span", "booked-key"));
+      item.appendChild(el("span", "", "dashed line = booked share"));
+      legend.appendChild(item);
+    }
+  }
+
   // ---------- controls + scheduling ----------
   function scheduleTimeline() {
     if (state.timelineTimer) clearInterval(state.timelineTimer);
     const every = state.timelineHours <= 24 ? 60000 : 300000;
     state.timelineTimer = setInterval(loadTimeline, every);
     $("refresh-indicator").title = "auto-refresh: live every 30 s, bookings every 1 min, timeline every "
-      + (every / 60000) + " min, usage and last 24 h every 5 min";
+      + (every / 60000) + " min, usage and the last-24 h panels every 5 min";
   }
   function bindButtons(groupId, attr, onPick) {
     const group = $(groupId);
@@ -1334,10 +1476,11 @@ if (typeof document !== "undefined") (function () {
 
   bindBookingForm();
   loadBookUsers();
-  loadNow().then(() => { loadClaims(); loadTimeline(); loadUsage(); loadTimeseries(); });
+  loadNow().then(() => { loadClaims(); loadTimeline(); loadUsage(); loadTimeseries(); loadVram(); });
   setInterval(loadNow, 30000);
   setInterval(loadClaims, 60000);
   scheduleTimeline();
   setInterval(loadUsage, 300000);
   setInterval(loadTimeseries, 300000);
+  setInterval(loadVram, 300000);
 })();

@@ -2,7 +2,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timeseries, usage
+from resourcemonitor.queries import (NoHistory, latest, open_ro, timeline, timeseries, usage,
+                                     vram_timeseries)
 from tests.history_fixture import build_history
 
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
@@ -254,7 +255,7 @@ def test_usage_total_gpu_hours_on_the_fixture_is_all_cards(db):
     assert u["gpu_hours_total"] == pytest.approx(8 * (24 - 5 / 60), abs=1e-6)  # 8 cards; first poll has no interval
 
 
-@pytest.mark.parametrize("fn", ["usage", "timeline", "timeseries"])
+@pytest.mark.parametrize("fn", ["usage", "timeline", "timeseries", "vram_timeseries"])
 def test_queries_on_a_db_without_polls_are_no_history(tmp_path, fn):
     from resourcemonitor.history import HistoryWriter
     p = tmp_path / "h.sqlite"
@@ -262,6 +263,69 @@ def test_queries_on_a_db_without_polls_are_no_history(tmp_path, fn):
     now = T0 + timedelta(hours=1)
     call = {"usage": lambda c: usage(c, date(2026, 10, 5), date(2026, 10, 5), "day", now),
             "timeline": lambda c: timeline(c, 24, now),
-            "timeseries": lambda c: timeseries(c, 24, now)}[fn]
+            "timeseries": lambda c: timeseries(c, 24, now),
+            "vram_timeseries": lambda c: vram_timeseries(c, 24, now)}[fn]
     with pytest.raises(NoHistory):
         call(open_ro(p))
+
+
+def _vram(db, hours=48, max_points=10**6):
+    return vram_timeseries(open_ro(db), hours=hours, now=T0 + timedelta(hours=48),
+                           max_points=max_points)
+
+
+def test_vram_buckets_per_gpu_match_the_fixture(db):
+    v = _vram(db)
+    assert v["to"] == (T0 + timedelta(hours=48)).isoformat() and v["from"] == T0.isoformat()
+    buckets = {g: set().union(*(p["by_user"] for p in d["points"])) for g, d in v["gpus"].items()}
+    assert buckets == {"0": set(), "1": set(), "2": set(), "3": set(), "4": {"(unattributed)"},
+                       "5": {"cwinkelmann"}, "6": {"dorian.zwanzig"}, "7": {"dorian.zwanzig"}}
+    assert all(d["total_mib"] == 81559 for d in v["gpus"].values())
+    g7 = v["gpus"]["7"]["points"]
+    assert len(g7) == 42 * 12                                # 48 h of 5-min polls minus the 6 h gap
+    assert [p["ts"] for p in g7] == sorted(p["ts"] for p in g7)
+    assert g7[0]["by_user"] == {"dorian.zwanzig": 22715 + 512}       # job + helper, summed
+    assert v["gpus"]["4"]["points"][0]["by_user"] == {"(unattributed)": 2048}
+
+
+def test_vram_point_sums_equal_the_proc_samples_of_that_poll(db):
+    import sqlite3
+    v = _vram(db)
+    c = sqlite3.connect(db)
+    for gpu in ("4", "5", "7"):
+        for p in v["gpus"][gpu]["points"][::97]:
+            (want,) = c.execute("SELECT COALESCE(SUM(used_mib), 0) FROM proc_samples "
+                                "WHERE ts = ? AND gpu = ?", (p["ts"], int(gpu))).fetchone()
+            assert sum(p["by_user"].values()) == want
+    c.close()
+
+
+def test_vram_polls_without_processes_are_empty_points(db):
+    v = _vram(db)
+    assert all(p["by_user"] == {} for p in v["gpus"]["0"]["points"])
+    g5 = {p["ts"]: p["by_user"] for p in v["gpus"]["5"]["points"]}
+    assert g5[(T0 + timedelta(hours=1)).isoformat()] == {}               # odd hour: idle
+    assert g5[(T0 + timedelta(hours=2)).isoformat()] == {"cwinkelmann": 12000}
+
+
+def test_vram_is_downsampled_by_averaging_with_missing_buckets_as_zero(db):
+    v = _vram(db, max_points=50)
+    assert all(0 < len(d["points"]) <= 50 for d in v["gpus"].values())
+    g5 = [p["by_user"].get("cwinkelmann", 0) for p in v["gpus"]["5"]["points"]]
+    assert any(0 < x < 12000 for x in g5)                    # chunks span busy and idle hours
+    assert all(p["by_user"]["dorian.zwanzig"] == pytest.approx(23227)
+               for p in v["gpus"]["7"]["points"])
+
+
+def test_vram_marks_the_first_point_after_a_monitoring_gap(db):
+    v = _vram(db)
+    for d in v["gpus"].values():
+        assert [p["ts"] for p in d["points"] if p.get("gap")] == [(T0 + timedelta(hours=36)).isoformat()]
+    small = _vram(db, max_points=50)
+    assert all(sum(1 for p in d["points"] if p.get("gap")) == 1 for d in small["gpus"].values())
+
+
+def test_vram_window_and_no_gap_flag_without_a_gap(db_nogap):
+    v = _vram(db_nogap, hours=1)
+    pts = v["gpus"]["6"]["points"]
+    assert len(pts) == 12 and not any(p.get("gap") for p in pts)

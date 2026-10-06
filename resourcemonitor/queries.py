@@ -8,6 +8,7 @@ from math import ceil
 from pathlib import Path
 
 from resourcemonitor.claims import Booking
+from resourcemonitor.energy import UNATTRIBUTED_BUCKET
 
 CAVEATS = [
     "Measured only while the monitor was running.",
@@ -143,6 +144,54 @@ def timeseries(conn: sqlite3.Connection, hours: int, now: datetime, max_points: 
                            "util_pct": sum(c[2] for c in chunk) / len(chunk)})
         out[str(gpu)] = points
     return {"gpus": out}
+
+
+def vram_timeseries(conn: sqlite3.Connection, hours: int, now: datetime,
+                    max_points: int = 300) -> dict:
+    """Per-GPU VRAM per poll, summed by user (bucket), for stacked charts.
+
+    A poll with no processes on a GPU is a point with an empty `by_user`; the first point
+    after a monitoring gap (a poll with dt_s NULL) carries `"gap": true`."""
+    _require_polls(conn)
+    lo = (now - timedelta(hours=hours)).isoformat()
+    # (gpu) -> [(ts, is_gap, {bucket: mib})], one entry per poll, in ts order
+    series: dict[int, list[tuple[str, bool, dict[str, int]]]] = {}
+    totals: dict[int, int] = {}
+    # The per-user sums are taken over the window first (proc_samples_ts), so the join never
+    # walks a GPU's whole retained history; a GPU row without processes joins to NULLs.
+    for ts, gpu, total, dt_s, user, n_procs, mib in conn.execute(
+            "WITH s AS (SELECT ts, gpu, user, COUNT(*) AS n, SUM(used_mib) AS mib "
+            "FROM proc_samples WHERE ts >= ?1 GROUP BY ts, gpu, user) "
+            "SELECT g.ts, g.gpu, g.total_mib, p.dt_s, s.user, s.n, s.mib "
+            "FROM gpu_samples g JOIN polls p ON p.ts = g.ts "
+            "LEFT JOIN s ON s.ts = g.ts AND s.gpu = g.gpu "
+            "WHERE g.ts >= ?1 ORDER BY g.gpu, g.ts", (lo,)):
+        totals[gpu] = max(totals.get(gpu, 0), total)
+        rows = series.setdefault(gpu, [])
+        if not rows or rows[-1][0] != ts:
+            rows.append((ts, dt_s is None, {}))
+        if n_procs:                                  # COUNT is 0 only for a poll without processes
+            rows[-1][2][UNATTRIBUTED_BUCKET if user is None else user] = mib
+    gpus: dict[str, dict] = {}
+    for gpu in sorted(series):
+        polls = series[gpu]
+        size = max(1, ceil(len(polls) / max_points))
+        points = []
+        for i in range(0, len(polls), size):
+            chunk = polls[i:i + size]
+            by_user: dict[str, float] = {}
+            for _ts, _gap, users in chunk:
+                for bucket, mib in users.items():
+                    by_user[bucket] = by_user.get(bucket, 0) + mib
+            point: dict = {"ts": chunk[0][0],
+                           "by_user": {b: v / len(chunk) if size > 1 else v
+                                       for b, v in by_user.items()}}
+            # A gap poll at the very start of the window has nothing before it to bridge.
+            if any(gap for k, (_ts, gap, _u) in enumerate(chunk) if i + k):
+                point["gap"] = True
+            points.append(point)
+        gpus[str(gpu)] = {"total_mib": totals[gpu], "points": points}
+    return {"from": lo, "to": now.isoformat(), "gpus": gpus}
 
 
 def _job(ts: str, user, name, mib: int) -> dict:
