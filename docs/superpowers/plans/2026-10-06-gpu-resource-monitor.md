@@ -10,6 +10,30 @@
 
 **Spec:** none — this plan is self-contained. The findings it argues from are recorded in "Measured facts" below; re-measure before contradicting any of them.
 
+## Reaching carrot
+
+Everything in this plan runs on one machine. How to get to it, measured 2026-10-06:
+
+| | |
+|---|---|
+| address | **`cwinkelmann@10.188.1.1`** |
+| hostname | **`carrot` does NOT resolve** — `Host carrot not found: 2(SERVFAIL)`. Always use the IP. |
+| auth | key-based; `ssh -o BatchMode=yes` succeeds with no password or prompt |
+| hardware | 8 × NVIDIA H100 80GB HBM3, driver 580.178.04 |
+| shared with | `dorian.zwanzig` (UID 1053). Split agreed 2026-08-19: dorian 0–3, cwinkelmann 4–7. |
+
+**The interpreter.** A non-interactive `ssh` gets `/usr/bin/python3` = Python 3.12.3, and
+**conda is not on `PATH`** in that context. That is exactly what this tool wants — it is
+stdlib-only by design, so it must run on the system interpreter and never on a conda env
+that might be renamed or removed. The systemd unit therefore hardcodes `/usr/bin/python3`.
+Do not "fix" it to `python3`: an interactive login may resolve that to a conda python.
+
+`nvidia-smi` is at `/usr/bin/nvidia-smi` and needs no special environment.
+
+**It is a shared machine.** Two consequences for anyone working on this tool: never run
+anything heavy on it while testing, and never add a code path that touches another user's
+processes (see the Global Constraints).
+
 ## Measured facts (carrot, 2026-10-06)
 
 These were established by direct measurement on the box. They are the reason several
@@ -1676,8 +1700,18 @@ so they belong in skills rather than in a human's memory.
 ```markdown
 # CLAUDE.md — ResourceMonitor
 
-A read-only watcher for the shared GPU box (**carrot**, `cwinkelmann@10.188.1.1`,
-8× H100 80GB). It attributes GPU occupancy and electricity to users and posts to Slack.
+A read-only watcher for the shared GPU box. It attributes GPU occupancy and electricity
+to users and posts to Slack.
+
+## The box
+
+`ssh cwinkelmann@10.188.1.1` — **the name "carrot" does not resolve in DNS, use the IP.**
+Key-based auth, no password. 8 × H100 80GB HBM3, shared with `dorian.zwanzig` (UID 1053);
+the split is dorian 0–3, cwinkelmann 4–7.
+
+Run it with `/usr/bin/python3` (3.12.3). conda is deliberately not used and is not on
+`PATH` over non-interactive ssh — the tool is stdlib-only so it keeps working when envs
+come and go.
 
 ## Non-negotiables
 
@@ -1726,8 +1760,24 @@ description: Use when installing, updating or restarting the GPU ResourceMonitor
 
 # Deploying ResourceMonitor
 
-Target: **carrot**, `cwinkelmann@10.188.1.1`. The service runs as a `systemd --user`
-unit; `Linger=yes` is already set for this user, so it survives logout and needs no root.
+## Reaching the box
+
+| | |
+|---|---|
+| address | **`cwinkelmann@10.188.1.1`** |
+| hostname | **`carrot` does not resolve in DNS** (`SERVFAIL`) — use the IP, always |
+| auth | key-based; `ssh -o BatchMode=yes` works with no prompt |
+| python | `/usr/bin/python3` (3.12.3). **conda is not on `PATH`** over non-interactive ssh — which is what we want, since the tool is stdlib-only. |
+| hardware | 8 × H100 80GB HBM3, driver 580.178.04, shared with `dorian.zwanzig` |
+
+Quick liveness check before anything else:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'hostname; nvidia-smi --query-gpu=count --format=csv,noheader | head -1'
+```
+
+The service runs as a `systemd --user` unit; `Linger=yes` is already set for this user, so
+it survives logout and needs no root.
 
 ## Never containerise this
 
