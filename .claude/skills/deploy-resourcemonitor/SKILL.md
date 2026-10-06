@@ -12,7 +12,7 @@ description: Use when installing, updating or restarting the GPU ResourceMonitor
 | address | **`cwinkelmann@10.188.1.1`** |
 | hostname | **`carrot` does not resolve in DNS** (`SERVFAIL`) — use the IP, always |
 | auth | key-based; `ssh -o BatchMode=yes` works with no prompt |
-| python | `/usr/bin/python3` (3.12.3). **conda is not on `PATH`** over non-interactive ssh — which is what we want, since the tool is stdlib-only. |
+| python | `~/miniconda3/envs/resourcemonitor/bin/python` (3.12). Units run in that conda env by the user's choice; code stays stdlib-only. **If the env is removed or renamed, the monitor stops** — recreate with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`. |
 | hardware | 8 × H100 80GB HBM3, driver 580.178.04, shared with `dorian.zwanzig` |
 
 Quick liveness check before anything else:
@@ -92,3 +92,17 @@ In this order: `systemctl --user status` (is it running?); `journalctl --user -u
 resourcemonitor -n 50` (is it erroring?); check the state file — an incident inside its
 cooldown is *supposed* to be silent; confirm `SLACK_WEBHOOK_URL` is still set, since an
 expired webhook returns a non-2xx that the tool logs but does not crash on.
+
+## Dashboard
+
+Read-only web page on the LAN (no auth, by choice), served by `resourcemonitor-web`:
+
+```bash
+ssh cwinkelmann@10.188.1.1 'cp ~/ResourceMonitor/deploy/resourcemonitor-web.service \
+  ~/.config/systemd/user/ && systemctl --user daemon-reload && \
+  systemctl --user enable --now resourcemonitor-web'
+ssh cwinkelmann@10.188.1.1 'curl -s http://10.188.1.1:8765/healthz'
+```
+
+Then open http://10.188.1.1:8765. Firewall caveat: if `healthz` works on carrot but the
+LAN cannot reach port 8765, ask carrot's admin to open it; do not change the firewall yourself.

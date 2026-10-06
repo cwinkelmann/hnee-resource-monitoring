@@ -9,9 +9,7 @@ to users and posts to Slack.
 Key-based auth, no password. 8 × H100 80GB HBM3, shared with `dorian.zwanzig` (UID 1053);
 the split is dorian 0–3, cwinkelmann 4–7.
 
-Run it with `/usr/bin/python3` (3.12.3). conda is deliberately not used and is not on
-`PATH` over non-interactive ssh — the tool is stdlib-only so it keeps working when envs
-come and go.
+The service runs in the `resourcemonitor` conda env (`~/miniconda3/envs/resourcemonitor`, Python 3.12) by the user's choice. The code stays stdlib-only, but **if that env is removed or renamed, the monitor stops**; recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`.
 
 ## Non-negotiables
 
@@ -31,6 +29,8 @@ come and go.
 
 `probe.py` is the only module that shells out. Everything else is a pure function of a
 `Snapshot`, which is why the rules are testable on a laptop with no GPU. Keep that seam.
+
+`history.py` writes the SQLite history and `web.py` reads it with `mode=ro`; `web.py` must never import probe or notify.
 
 ## Energy numbers are estimates
 

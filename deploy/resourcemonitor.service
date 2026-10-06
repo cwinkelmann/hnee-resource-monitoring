@@ -9,7 +9,7 @@ Type=simple
 Environment=PYTHONUNBUFFERED=1
 # mode 0600; holds SLACK_WEBHOOK_URL
 EnvironmentFile=%h/.config/resourcemonitor/env
-ExecStart=/usr/bin/python3 -m resourcemonitor watch --interval 60 --post
+ExecStart=%h/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor watch --interval 60 --post
 WorkingDirectory=%h/ResourceMonitor
 Restart=always
 RestartSec=30

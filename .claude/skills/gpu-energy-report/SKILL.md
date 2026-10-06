@@ -11,6 +11,8 @@ ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && python3 -m resourcemonitor r
 
 Add `--post` to send it to Slack instead of printing it.
 
+The dashboard's Usage section (http://10.188.1.1:8765) shows the same numbers, with history.
+
 ## Two caveats that must travel with every number
 
 1. **It measures uptime, not history.** The driver on carrot exposes no
