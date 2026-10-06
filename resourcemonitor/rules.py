@@ -53,3 +53,49 @@ def check_capacity(snap: Snapshot, pol: Policy) -> list[Alert]:
               f"Most free: GPU {best} with {_mib(free[best])}." if best is not None
               else "No GPUs reported."),
     )]
+
+
+class IdleTracker:
+    """Remembers when each process last looked busy.
+
+    GPU utilisation is per-DEVICE, not per-process, so "idle" here means the card
+    this process sits on is below the threshold. With one process per card that is
+    exact; with two it is conservative, which is the right direction -- it under-reports
+    rather than accusing a busy job of being parked.
+    """
+
+    def __init__(self) -> None:
+        self._busy_since: dict[int, object] = {}   # pid -> last time it looked busy
+
+    def tracked(self) -> int:
+        return len(self._busy_since)
+
+    def observe(self, snap: Snapshot, pol: Policy) -> list[Alert]:
+        util = {g.index: g.util_pct for g in snap.gpus}
+        live = {p.pid for p in snap.procs}
+        for pid in list(self._busy_since):
+            if pid not in live:
+                del self._busy_since[pid]          # exited; forget it
+
+        out = []
+        for p in snap.procs:
+            if p.used_mib < pol.idle_min_mib:
+                self._busy_since.pop(p.pid, None)
+                continue
+            if util.get(p.gpu_index, 100) > pol.idle_util_pct:
+                self._busy_since[p.pid] = snap.taken_at
+                continue
+            first = self._busy_since.setdefault(p.pid, snap.taken_at)
+            idle_s = (snap.taken_at - first).total_seconds()
+            if idle_s >= pol.idle_grace_s:
+                out.append(Alert(
+                    kind="idle",
+                    key=f"idle:{p.user}:{p.gpu_index}:{p.pid}",
+                    gpu_index=p.gpu_index,
+                    user=p.user,
+                    text=(f"{p.user or 'an unattributed process'} has held "
+                          f"{_mib(p.used_mib)} on GPU {p.gpu_index} at "
+                          f"{util.get(p.gpu_index, 0)}% utilisation for "
+                          f"{int(idle_s // 60)} minutes."),
+                ))
+        return out
