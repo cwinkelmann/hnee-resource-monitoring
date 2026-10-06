@@ -84,3 +84,24 @@ poll (default on) and pruned to 90 days (`--retention-days`).
 Energy caveats apply to every kWh figure: measured only while the monitor was running, and
 per-user kWh splits a card's draw by memory share when several processes share it, so it is an
 estimate, not a measurement.
+
+## Booking a GPU
+
+Book a share of a GPU on the dashboard (VRAM for a time window): pick your user, the GPU, how
+many GiB (1 GiB up to the card total), a start and an end, and an optional note (120
+characters max). A booking lasts at most **14 days**. To cancel, use the cancel button on your
+booking; cancelling keeps the row (marked cancelled), nothing is deleted.
+
+This is an **honour system**. The dashboard is unauthenticated, so anyone on the LAN can book
+or cancel in any name; every change is shown with its time and IP address.
+
+Bookings are reported and **never enforced**: no process is ever signalled, limited or
+reprioritised. The monitor only compares each user's real VRAM use on a card with what they
+booked and alerts on a mismatch:
+
+- Use above **110 %** of the booked VRAM raises an alert (exactly 110 % does not).
+- Memory used without any booking is reported as unbooked use.
+- The unbooked remainder of a card is free for anyone to use.
+
+Bookings live in `~/.local/state/resourcemonitor/claims.sqlite`, written only by the web
+process. If that file is missing or broken, monitoring carries on as if nothing were booked.

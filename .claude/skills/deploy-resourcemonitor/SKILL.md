@@ -117,3 +117,14 @@ ssh cwinkelmann@10.188.1.1 'curl -s http://10.188.1.1:8765/healthz'
 
 Then open http://10.188.1.1:8765. Firewall caveat: if `healthz` works on carrot but the
 LAN cannot reach port 8765, ask carrot's admin to open it; do not change the firewall yourself.
+
+## Bookings
+
+GPU bookings live in `~/.local/state/resourcemonitor/claims.sqlite`, created and written only
+by the web process (`history.sqlite` stays read-only to it; `watch` reads claims read-only).
+After every code update restart **both** units, since the soak reads bookings and the web
+unit serves them:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'systemctl --user restart resourcemonitor-soak resourcemonitor-web'
+```
