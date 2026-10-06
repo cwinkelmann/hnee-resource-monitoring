@@ -39,7 +39,7 @@ class EnergyLedger:
     since: str | None = None
     _last: Snapshot | None = field(default=None, repr=False)
 
-    def accumulate(self, snap) -> tuple[float | None, list[EnergyRow]]:
+    def accumulate(self, snap: Snapshot) -> tuple[float | None, list[EnergyRow]]:
         prev, self._last = self._last, snap
         if self.since is None:
             self.since = snap.taken_at.isoformat()
