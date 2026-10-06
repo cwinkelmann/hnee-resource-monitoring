@@ -40,6 +40,7 @@ if (typeof document !== "undefined") (function () {
   const CALENDAR_DAYS = 14;
   const CHANGES_SHOWN = 20;
   const USER_KEY = "rm.user";
+  const HOLDER_ERROR_MS = 20000;              // how long a card shows a quick-booking error
 
   const state = {
     now: null, timeline: null, usage: null, timeseries: null,
@@ -56,6 +57,9 @@ if (typeof document !== "undefined") (function () {
     untilMode: "4h",         // "4h" | "1d" | "fri" | "custom"
     fromAuto: true,          // "from" follows the clock until the user edits it
     booking: false,          // a POST is in flight
+    holderWant: new Map(),   // gpu -> the latest holder picked on its card ("" = free)
+    holderBusy: new Set(),   // gpus with a quick-booking POST in flight
+    holderErrors: new Map(), // gpu -> the last quick-booking error shown on its card
   };
 
   const $ = (id) => document.getElementById(id);
@@ -286,6 +290,7 @@ if (typeof document !== "undefined") (function () {
     if (!data) return;
     state.bookUsers = data.users;
     renderUserSelect();
+    renderNow();                                  // the cards' holder dropdowns list the users
   }
   // POST a JSON body; resolves to {status, body} (body null when not JSON), status 0 if unreachable.
   async function postJson(url, payload) {
@@ -344,9 +349,24 @@ if (typeof document !== "undefined") (function () {
       ? "Monitor not running since " + fmtLocal(polled) + " — numbers below are not live" : "";
 
     const grid = $("gpu-grid");
-    clear(grid);
     const red = new Set(d.alerts.filter((a) => RED_ALERTS.has(a.kind)).map((a) => a.gpu));
-    for (const g of d.gpus) grid.appendChild(gpuCard(g, red.has(g.gpu)));
+    // A holder dropdown that has focus (or is open) is never rebuilt under the user: its
+    // card is refreshed around it instead, and the dropdown catches up after the change.
+    const keep = document.activeElement;
+    if (!(keep && keep.classList.contains("holder") && grid.contains(keep))) {
+      clear(grid);
+      for (const g of d.gpus) grid.appendChild(gpuCard(g, red.has(g.gpu)));
+    } else {
+      const oldCard = keep.closest(".card");
+      for (const c of Array.from(grid.childNodes)) if (c !== oldCard) grid.removeChild(c);
+      let before = true;
+      for (const g of d.gpus) {
+        const card = gpuCard(g, red.has(g.gpu));
+        if (String(g.gpu) === keep.dataset.gpu) { refreshCardAround(oldCard, card, keep.parentNode); before = false; }
+        else if (before) grid.insertBefore(card, oldCard);
+        else grid.appendChild(card);
+      }
+    }
 
     // Slack wording only when the monitor recorded its mode: one line for a dry run,
     // a per-alert status only when it is really posting, nothing for older histories.
@@ -373,8 +393,11 @@ if (typeof document !== "undefined") (function () {
     const card = el("div", "card" + (red ? " flagged" : ""));
     const head = el("div", "card-head");
     head.appendChild(el("span", "gpu", "GPU " + g.gpu));
+    head.appendChild(holderNode(g));
     head.appendChild(el("span", "free", fmtGiB(g.free_mib) + " free"));
     card.appendChild(head);
+    const err = state.holderErrors.get(g.gpu);
+    if (err) card.appendChild(el("p", "holder-error", err));
 
     const booked = el("ul", "card-bookings");
     if (!g.bookings.length) booked.appendChild(el("li", "none", "not booked"));
@@ -439,6 +462,102 @@ if (typeof document !== "undefined") (function () {
     }
     card.appendChild(ul);
     return card;
+  }
+
+  // ---------- quick booking: the holder dropdown on each card ----------
+  // The GPU's quick booking (whole card until 09:00) and whether a calendar booking is active.
+  function holderOf(g) {
+    return {
+      quick: g.bookings.find((b) => b.kind === "quick") || null,
+      calendar: g.bookings.some((b) => b.kind !== "quick"),
+    };
+  }
+  function holderHint(h) {
+    if (h.calendar) return "partly booked — use the calendar";
+    return h.quick ? "until " + fmtTime(new Date(h.quick.end)) : "";
+  }
+  function holderNode(g) {
+    const h = holderOf(g);
+    const wrap = el("span", "holder-wrap");
+    const sel = el("select", "holder");
+    sel.setAttribute("aria-label", "holder of GPU " + g.gpu);
+    sel.dataset.gpu = String(g.gpu);
+    if (h.calendar) {                     // the quick dropdown never touches calendar bookings
+      sel.appendChild(el("option", "", "— calendar —"));
+      sel.disabled = true;
+    } else {
+      const free = el("option", "", "— free —");
+      free.value = "";
+      sel.appendChild(free);
+      const names = (state.bookUsers || []).slice();
+      if (h.quick && !names.includes(h.quick.user)) names.push(h.quick.user);
+      for (const u of names) {
+        const o = el("option", "", u);
+        o.value = u;
+        sel.appendChild(o);
+      }
+      sel.value = h.quick ? h.quick.user : "";
+      sel.addEventListener("change", () => setHolder(g.gpu, sel));
+    }
+    wrap.appendChild(sel);
+    wrap.appendChild(el("span", "hint holder-hint", holderHint(h)));
+    return wrap;
+  }
+  // Replace oldNode's children with newNode's, except `kept` (in oldNode), which stays where
+  // `slot` (in newNode) is.
+  function replaceAround(oldNode, newNode, kept, slot) {
+    for (const c of Array.from(oldNode.childNodes)) if (c !== kept) oldNode.removeChild(c);
+    let after = false;
+    for (const c of Array.from(newNode.childNodes)) {
+      if (c === slot) after = true;
+      else if (after) oldNode.appendChild(c);
+      else oldNode.insertBefore(c, kept);
+    }
+    oldNode.className = newNode.className;
+  }
+  function refreshCardAround(oldCard, newCard, oldWrap) {
+    const newWrap = newCard.querySelector(".holder-wrap");
+    replaceAround(oldCard, newCard, oldWrap.parentNode, newWrap.parentNode);
+    replaceAround(oldWrap.parentNode, newWrap.parentNode, oldWrap, newWrap);
+  }
+  // Show the server's state in a dropdown that was kept because it had focus.
+  function syncHolder(gpu, sel) {
+    const g = nowGpu(gpu);
+    if (!g || !sel.isConnected) return;
+    const h = holderOf(g);
+    if (h.calendar) { sel.blur(); renderNow(); return; }   // rebuilt as the disabled dropdown
+    const want = h.quick ? h.quick.user : "";
+    if (want && !Array.from(sel.options).some((o) => o.value === want)) { sel.blur(); renderNow(); return; }
+    if (sel.value !== want) sel.value = want;
+    sel.parentNode.querySelector(".holder-hint").textContent = holderHint(h);
+  }
+  // One request per GPU at a time; picks made meanwhile are sent next, the latest one wins.
+  async function setHolder(gpu, sel) {
+    state.holderWant.set(gpu, sel.value);
+    if (state.holderBusy.has(gpu)) return;
+    state.holderBusy.add(gpu);
+    let res, sent;
+    try {
+      do {
+        sent = state.holderWant.get(gpu);
+        res = await postJson("/api/claims/quick", { user: sent || null, gpu: gpu });
+      } while ((res.status === 200 || res.status === 201) && state.holderWant.get(gpu) !== sent);
+    } finally {
+      state.holderBusy.delete(gpu);
+      state.holderWant.delete(gpu);
+    }
+    if (res.status === 200 || res.status === 201) state.holderErrors.delete(gpu);
+    else {
+      const text = errorText(res);
+      state.holderErrors.set(gpu, text);
+      setTimeout(() => {                      // the error line goes after a while
+        if (state.holderErrors.get(gpu) === text) { state.holderErrors.delete(gpu); renderNow(); }
+      }, HOLDER_ERROR_MS);
+    }
+    await loadNow();
+    syncHolder(gpu, sel);
+    renderNow();                              // shows or clears the card's error line
+    loadClaims();
   }
 
   // ---------- Bookings ----------
@@ -511,8 +630,15 @@ if (typeof document !== "undefined") (function () {
     if (w.until <= w.from) { preview.textContent = "“Until” must be after “from”."; return; }
     const free = windowFree(gpu, w), card = cardMiB(gpu);
     vram.max = String(Math.floor(free / 1024));
+    const span = " on GPU " + gpu + " from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until));
+    if (!vram.value) {                          // VRAM is optional: empty books the whole card
+      preview.textContent = free < card
+        ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is free in that window — enter less VRAM or pick another time."
+        : "You'd book the whole card (" + fmtGiB(card) + ")" + span + ".";
+      return;
+    }
     const gib = Number(vram.value);
-    if (!vram.value || !(gib > 0)) {
+    if (!(gib > 0)) {
       preview.textContent = "GPU " + gpu + " has " + fmtGiB(free) + " of " + fmtGiB(card)
         + " free from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until)) + ".";
       return;
@@ -520,8 +646,7 @@ if (typeof document !== "undefined") (function () {
     const left = free - gib * 1024;
     preview.textContent = left < 0
       ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is free in that window — book less or pick another time."
-      : "You'd book " + gibText(gib * 1024) + " of " + fmtGiB(card) + " on GPU " + gpu
-        + " from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until))
+      : "You'd book " + gibText(gib * 1024) + " of " + fmtGiB(card) + span
         + "; " + fmtGiB(left) + " stays free.";
   }
 
@@ -541,9 +666,11 @@ if (typeof document !== "undefined") (function () {
     if (!user) { showBookError("Pick your user name first."); return; }
     if (isNaN(w.from) || isNaN(w.until)) { showBookError("Pick when the booking starts and ends."); return; }
     const payload = {
-      user: user, gpu: Number($("book-gpu").value), vram_gib: Number($("book-vram").value),
+      user: user, gpu: Number($("book-gpu").value),
       start: isoWithOffset(new Date(w.from)), end: isoWithOffset(new Date(w.until)),
     };
+    const vram = $("book-vram").value;
+    if (vram) payload.vram_gib = Number(vram);  // omitted: the server books the whole card
     if (note) payload.note = note;
     state.booking = true;
     $("book-submit").disabled = true;

@@ -90,7 +90,14 @@ estimate, not a measurement.
 Book a share of a GPU on the dashboard (VRAM for a time window): pick your user, the GPU, how
 many GiB (1 GiB up to the card total), a start and an end, and an optional note (120
 characters max). A booking lasts at most **14 days**. To cancel, use the cancel button on your
-booking; cancelling keeps the row (marked cancelled), nothing is deleted.
+booking; cancelling keeps the row (marked cancelled), nothing is deleted. Leaving VRAM empty
+books the whole card.
+
+**Quick booking.** Each GPU card in *Now* has a `holder` dropdown. Picking a name books the whole
+card for that user from now until the next **09:00** (Europe/Berlin), so every morning the
+cards are free again; picking `— free —` releases it. The dropdown only works on a card with no
+active calendar booking (then it shows "partly booked — use the calendar"), and a quick booking
+ends early where a calendar booking on that GPU begins. It never cancels a calendar booking.
 
 This is an **honour system**. The dashboard is unauthenticated, so anyone on the LAN can book
 or cancel in any name; every change is shown with its time and IP address.

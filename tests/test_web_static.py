@@ -95,3 +95,16 @@ def test_free_vram_is_the_minimum_over_the_window_counting_only_live_claims_on_t
                          timeout=30)
     assert out.returncode == 0, out.stderr
     assert "ok" in out.stdout
+
+
+def test_quick_booking_dropdown_posts_to_its_route_without_dialogs():
+    js = (WEB / "app.js").read_text()
+    assert '"/api/claims/quick"' in js and "confirm(" not in js and "alert(" not in js
+    assert 'document.activeElement' in js            # the refresh skips a focused holder select
+
+
+def test_vram_is_optional_in_the_booking_form():
+    html = (WEB / "index.html").read_text()
+    tag = re.search(r'<input id="book-vram"[^>]*>', html).group(0)
+    assert "required" not in tag and 'placeholder="whole card"' in tag
+    assert "VRAM (GiB, optional)" in html

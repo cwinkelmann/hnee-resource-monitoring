@@ -142,6 +142,14 @@ rect.unatt { stroke: var(--unatt-stroke); stroke-width: 1.5; stroke-dasharray: 4
 .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; flex-wrap: wrap; }
 .card-head .gpu { font-weight: 700; font-size: 15px; }
 .card-head .free { color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.card-head .holder-wrap { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; margin-right: auto; }
+select.holder {
+  font: inherit; font-size: 12px; padding: 1px 4px; max-width: 10.5em; min-width: 0;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text);
+}
+select.holder:disabled { color: var(--muted); }
+.holder-hint { white-space: nowrap; }
+.holder-error { margin: 4px 0 0; padding: 3px 6px; border-radius: 4px; background: var(--danger-bg); color: var(--danger); font-size: 12px; }
 .card-bookings { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; color: var(--text-2); }
 .card-bookings li { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-bookings .none, .card-bookings .more { color: var(--muted); }
