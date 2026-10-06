@@ -1,10 +1,10 @@
 import sqlite3
 import threading
-from datetime import timedelta, timezone
+from datetime import timedelta
 
 import pytest
 
-from resourcemonitor.claims import (Booking, ClaimError, ClaimsStore, load_active, parse_time)
+from resourcemonitor.claims import (ClaimError, ClaimsStore, load_active, parse_time)
 from tests.claims_fixture import FakeUsers, T0, book
 
 
@@ -161,3 +161,29 @@ def test_load_active_is_read_only_and_fail_open(store, tmp_path, capsys):
     bad.write_bytes(b"not a database at all" * 100)
     assert load_active(bad, T0) == []
     assert "claims unavailable: DatabaseError" in capsys.readouterr().out
+
+
+def test_user_name_with_trailing_newline_is_invalid(store):
+    assert _err(lambda: book(store, user="bob\n")) == (400, "invalid user name")
+
+
+@pytest.mark.parametrize("note", ["del\x7f", "nel\x85"])
+def test_del_and_c1_controls_in_note_are_invalid(store, note):
+    assert _err(lambda: book(store, note=note)) == (400, "invalid note")
+
+
+def test_conflict_end_is_capped_at_the_requested_end(store):
+    book(store, user="cwinkelmann", gib=79, hours=4)
+    status, detail = _err(lambda: book(store, gib=10, hours=1))
+    assert status == 409 and "between Tue 06 Oct 12:00 UTC and Tue 06 Oct 13:00 UTC" in detail
+
+
+def test_load_active_fails_open_on_a_malformed_row(store, tmp_path, capsys):
+    book(store)
+    conn = sqlite3.connect(tmp_path / "c.sqlite")
+    with conn:
+        conn.execute("INSERT INTO claims (user, gpu, vram_mib, start, end, created_at, created_ip) "
+                     "VALUES ('x', 4, 1024, '2026-10-06 garbage', '9999-12-31', 'garbage', 'ip')")
+    conn.close()
+    assert load_active(tmp_path / "c.sqlite", T0 + timedelta(hours=1)) == []
+    assert "claims unavailable: ValueError" in capsys.readouterr().out

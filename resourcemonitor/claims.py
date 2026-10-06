@@ -93,7 +93,7 @@ class PwdUsers:
         self.min_uid = min_uid
 
     def _real(self, name: str, uid: int) -> bool:
-        return uid >= self.min_uid and uid != _NOBODY_UID and bool(USER_RE.match(name))
+        return uid >= self.min_uid and uid != _NOBODY_UID and bool(USER_RE.fullmatch(name))
 
     def known(self, name: str) -> bool:
         try:
@@ -135,7 +135,7 @@ def _row(r: tuple) -> Booking:
 def _validate(users: UserDirectory, user: str, gpu: int, vram_mib: int, start: datetime,
               end: datetime, note: str | None, now: datetime, card_mib: int) -> str | None:
     """Raise ClaimError(400) on the first broken rule; return the note to store."""
-    if not isinstance(user, str) or not USER_RE.match(user):
+    if not isinstance(user, str) or not USER_RE.fullmatch(user):
         raise ClaimError(400, "invalid user name")
     if not users.known(user):
         raise ClaimError(400, f"unknown user '{user}'")
@@ -153,7 +153,7 @@ def _validate(users: UserDirectory, user: str, gpu: int, vram_mib: int, start: d
         return None
     if len(note) > NOTE_MAX:
         raise ClaimError(400, "note too long")
-    if any(ord(c) < 32 for c in note):
+    if any(ord(c) < 32 or 0x7F <= ord(c) <= 0x9F for c in note):
         raise ClaimError(400, "invalid note")
     return note if note.strip() else None
 
@@ -167,7 +167,7 @@ def _check_capacity(overlapping: list[Booking], gpu: int, vram_mib: int, start: 
         active = [b for b in overlapping if b.active_at(t)]
         booked = sum(b.vram_mib for b in active)
         if booked + vram_mib > card_mib:
-            t2 = min(b.end for b in active)
+            t2 = min(min(b.end for b in active), end)
             free = (card_mib - booked) / MIB_PER_GIB
             raise ClaimError(409, f"GPU {gpu} has only {free:.1f} GiB unbooked between "
                                   f"{t.strftime(_TIME_FMT)} and {t2.strftime(_TIME_FMT)}")
@@ -182,9 +182,13 @@ class ClaimsStore:
         # Autocommit mode: transactions are opened explicitly with BEGIN IMMEDIATE.
         self._conn = sqlite3.connect(str(path), timeout=5, check_same_thread=False,
                                      isolation_level=None)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
-        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.executescript(_SCHEMA)
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        except BaseException:
+            self._conn.close()
+            raise
 
     def create(self, *, user: str, gpu: int, vram_mib: int, start: datetime, end: datetime,
                note: str | None, ip: str, now: datetime,
@@ -207,7 +211,8 @@ class ClaimsStore:
                 claim_id = cur.lastrowid
                 conn.execute("COMMIT")
             except BaseException:
-                conn.execute("ROLLBACK")
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
                 raise
         return Booking(id=claim_id, user=user, gpu=gpu, vram_mib=vram_mib, start=start,
                        end=end, note=note, created_at=now, created_ip=ip)
@@ -226,7 +231,8 @@ class ClaimsStore:
                                       (claim_id,)).fetchone()
                 conn.execute("COMMIT")
             except BaseException:
-                conn.execute("ROLLBACK")
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
                 raise
         if row is None:
             raise ClaimError(404, "no such booking")
@@ -258,11 +264,11 @@ class ClaimsStore:
 def load_active(path: Path | str, t: datetime) -> list[Booking]:
     """Bookings active at t, read with mode=ro. Fail-open: a missing, corrupt or locked
     file means no bookings, and the error is printed by exception class only."""
-    path = Path(path)
-    if not path.exists():
-        return []
-    ts = _utc(t).isoformat()
     try:
+        path = Path(path)
+        if not path.exists():
+            return []
+        ts = _utc(t).isoformat()
         # as_uri() percent-encodes '?', '#' and '%', so they cannot leak into the query string.
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         try:
@@ -271,7 +277,7 @@ def load_active(path: Path | str, t: datetime) -> list[Booking]:
                 "AND start <= ? AND end > ? ORDER BY gpu, start, id", (ts, ts)).fetchall()
         finally:
             conn.close()
-    except (sqlite3.Error, OSError) as e:
+        return [_row(r) for r in rows]
+    except (sqlite3.Error, OSError, ValueError) as e:
         print(f"claims unavailable: {type(e).__name__}")
         return []
-    return [_row(r) for r in rows]
