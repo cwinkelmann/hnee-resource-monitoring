@@ -137,3 +137,12 @@ def test_over_booker_and_crowding_non_booker_are_both_reported():
     assert {(a.kind, a.key) for a in alerts} == {
         ("over_booking", "booking:over:dorian.zwanzig:4"),
         ("booked_gpu", "booking:other:andre.kliem:4")}
+
+
+def test_a_quick_booking_holds_the_whole_card_like_any_other_booking():
+    q = Booking(id=7, user="dorian.zwanzig", gpu=4, vram_mib=81559, start=T0 - timedelta(hours=1),
+                end=T0 + timedelta(hours=19), note="quick booking", created_at=T0 - timedelta(hours=1),
+                created_ip="10.0.0.1", kind="quick")
+    (a,) = check_bookings(_snap([_p("andre.kliem", 2 * GIB)]), POL, [q])
+    assert (a.kind, a.user) == ("booked_gpu", "andre.kliem")
+    assert check_bookings(_snap([_p("dorian.zwanzig", 70 * GIB)]), POL, [q]) == []

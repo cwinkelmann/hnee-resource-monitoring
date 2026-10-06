@@ -354,3 +354,134 @@ def test_history_stays_unwritable_and_serve_imports_nothing_forbidden(tmp_path, 
             conn.execute("DELETE FROM polls")
     finally:
         conn.close()
+
+
+# ---------- quick booking: POST /api/claims/quick ----------
+def _get(url):
+    with urllib.request.urlopen(url, timeout=5) as r:
+        return json.loads(r.read())
+
+
+def test_quick_books_then_releases(live):
+    s, _, body = _post(live + "/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 3})
+    c = json.loads(body)["claim"]
+    assert s == 201 and (c["kind"], c["vram_mib"], c["note"]) == ("quick", 81559, "quick booking")
+    assert c["start"] == T0.isoformat() and c["end"] == "2026-10-07T07:00:00+00:00"
+    s, _, body = _post(live + "/api/claims/quick", {"user": "andre.kliem", "gpu": 3})
+    assert s == 201
+    s, _, body = _post(live + "/api/claims/quick", {"user": None, "gpu": 3})
+    assert (s, json.loads(body)) == (200, {"claim": None})
+    s, _, body = _post(live + "/api/claims/quick", {"user": None, "gpu": 3})
+    assert (s, json.loads(body)) == (200, {"claim": None})            # nothing to release
+    claims = _get(live + "/api/claims")["claims"]
+    assert [(x["user"], x["cancelled_ip"]) for x in claims] == [
+        ("dorian.zwanzig", "127.0.0.1"), ("andre.kliem", "127.0.0.1")]
+
+
+def test_quick_bookings_appear_in_now_with_their_kind(live):
+    assert _post(live + "/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 3})[0] == 201
+    assert _post(live + "/api/claims", _booking(gpu=5, vram_gib=10))[0] == 201
+    gpus = {g["gpu"]: g for g in _get(live + "/api/now")["gpus"]}
+    assert [(b["user"], b["kind"]) for b in gpus[3]["bookings"]] == [("dorian.zwanzig", "quick")]
+    assert [b["kind"] for b in gpus[5]["bookings"]] == ["calendar"]
+
+
+@pytest.mark.parametrize("payload, detail", [
+    ({"user": "dorian.zwanzig", "gpu": 3, "vram_gib": 4}, "unknown field"),
+    ({"user": "dorian.zwanzig", "gpu": True}, "missing or invalid field 'gpu'"),
+    ({"user": "dorian.zwanzig", "gpu": "3"}, "missing or invalid field 'gpu'"),
+    ({"user": "dorian.zwanzig"}, "missing or invalid field 'gpu'"),
+    ({"gpu": 3}, "missing or invalid field 'user'"),
+    ({"user": 5, "gpu": 3}, "missing or invalid field 'user'"),
+    ({"user": "dorain", "gpu": 3}, "unknown user 'dorain'"),
+    ({"user": "<script>", "gpu": 3}, "invalid user name"),
+    ({"user": "dorian.zwanzig", "gpu": 8}, "GPU must be 0–7"),
+])
+def test_quick_bad_requests_are_400(live, payload, detail):
+    s, _, body = _post(live + "/api/claims/quick", payload)
+    assert (s, json.loads(body)) == (400, {"error": "invalid", "detail": detail})
+
+
+def test_quick_is_409_while_a_calendar_booking_is_active(live):
+    assert _post(live + "/api/claims", _booking(gpu=3, vram_gib=10))[0] == 201
+    s, _, body = _post(live + "/api/claims/quick", {"user": "andre.kliem", "gpu": 3})
+    assert (s, json.loads(body)) == (409, {"error": "conflict",
+                                           "detail": "GPU 3 has calendar bookings — use the calendar"})
+
+
+def test_quick_rejects_foreign_origin_and_non_json(live):
+    url = live + "/api/claims/quick"
+    q = {"user": "dorian.zwanzig", "gpu": 3}
+    s, _, body = _post(url, q, headers={"Origin": "http://evil.example"})
+    assert (s, json.loads(body)) == (403, {"error": "forbidden"})
+    s, _, body = _post(url, q, headers={"Content-Type": "text/plain"})
+    assert (s, json.loads(body)) == (415, {"error": "unsupported media type"})
+    s, _, body = _post(url, None, raw=b" " * 5000)
+    assert (s, json.loads(body)) == (413, {"error": "too large"})
+    s, _, body = _post(url, None, raw=b"[]")
+    assert (s, json.loads(body)["detail"]) == (400, "body must be a JSON object")
+
+
+def test_quick_counts_against_the_write_rate_limit(live, monkeypatch):
+    monkeypatch.setattr(web, "_WRITES", web._RateLimiter(limit=1))
+    assert _post(live + "/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 3})[0] == 201
+    s, _, body = _post(live + "/api/claims/quick", {"user": None, "gpu": 3})
+    assert (s, json.loads(body)) == (429, {"error": "too many requests"})
+
+
+def test_quick_responses_carry_the_security_headers(live):
+    url = live + "/api/claims/quick"
+    for payload, status in (({"user": "dorian.zwanzig", "gpu": 3}, 201), ({"user": None, "gpu": 3}, 200),
+                            ({"user": None, "gpu": True}, 400)):
+        s, headers, _ = _post(url, payload)
+        assert s == status
+        assert headers["Content-Security-Policy"] == "default-src 'self'"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert headers["Cache-Control"] == "no-store"
+        assert not any(k.lower().startswith("access-control-") for k in headers)
+
+
+def test_get_on_quick_is_404(live):
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(live + "/api/claims/quick", timeout=5)
+    assert e.value.code == 404
+
+
+# ---------- VRAM is optional in POST /api/claims ----------
+@pytest.mark.parametrize("over", [{}, {"vram_gib": None}], ids=["absent", "null"])
+def test_booking_without_vram_takes_the_whole_card(live, over):
+    payload = _booking(**over)
+    if not over:
+        del payload["vram_gib"]
+    s, _, body = _post(live + "/api/claims", payload)
+    assert s == 201 and json.loads(body)["claim"]["vram_mib"] == 81559
+
+
+def test_whole_card_booking_against_an_existing_share_is_409(live):
+    assert _post(live + "/api/claims", _booking(user="andre.kliem", vram_gib=1))[0] == 201
+    payload = _booking()
+    del payload["vram_gib"]
+    s, _, body = _post(live + "/api/claims", payload)
+    assert s == 409 and "unbooked between" in json.loads(body)["detail"]
+
+
+def test_whole_card_booking_uses_the_latest_poll_total(tmp_path, monkeypatch):
+    monkeypatch.setattr(history_fixture, "TOTAL_MIB", 40 * 1024)
+    hist = tmp_path / "small.sqlite"
+    build_history(hist, T0 - timedelta(hours=1), hours=1)
+    srv, base = _start(tmp_path, hist)
+    try:
+        s, _, body = _post(base + "/api/claims", _booking(vram_gib=None))
+        assert (s, json.loads(body)["claim"]["vram_mib"]) == (201, 40 * 1024)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.mark.parametrize("route, payload", [
+    ("/api/claims", _booking(gpu=10**20)),
+    ("/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 10**20}),
+], ids=["calendar", "quick"])
+def test_huge_gpu_number_is_a_400_not_a_500(live, route, payload):
+    s, _, body = _post(live + route, payload)
+    assert (s, json.loads(body)) == (400, {"error": "invalid", "detail": "GPU must be 0–7"})

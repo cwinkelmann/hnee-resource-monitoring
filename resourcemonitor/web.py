@@ -1,6 +1,6 @@
 """HTTP dashboard server: fixed routes, no access log. GETs read the history and
-claims databases with mode=ro; the only writes are bookings (POST /api/claims and
-/api/claims/<id>/cancel) into claims.sqlite, behind drive-by protections.
+claims databases with mode=ro; the only writes are bookings (POST /api/claims,
+/api/claims/quick and /api/claims/<id>/cancel) into claims.sqlite, behind drive-by protections.
 
 Never imports probe, notify or cli.
 """
@@ -19,9 +19,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from resourcemonitor.claims import (DEFAULT_CARD_MIB, DEFAULT_CLAIMS, MIB_PER_GIB, ClaimError,
-                                    ClaimsStore, PwdUsers, UserDirectory, list_window_ro,
-                                    load_active, parse_time)
+from resourcemonitor.claims import (DEFAULT_CARD_MIB, DEFAULT_CLAIMS, GPU_COUNT, MIB_PER_GIB,
+                                    ClaimError, ClaimsStore, PwdUsers, UserDirectory,
+                                    list_window_ro, load_active, parse_time)
 from resourcemonitor.paths import DEFAULT_HISTORY, DEFAULT_POLICY
 from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timeseries, usage
 
@@ -46,6 +46,8 @@ _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
                                  "/api/timeline", "/api/users", "/healthz"}
 _CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note")
+_QUICK = "/api/claims/quick"
+_QUICK_FIELDS = ("user", "gpu")
 _CLAIM_ERRORS = {400: "invalid", 404: "not found", 409: "conflict"}
 
 
@@ -211,13 +213,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._method_not_allowed()
             return
         m = _CANCEL.match(path)
-        if path != "/api/claims" and m is None:
+        if path not in ("/api/claims", _QUICK) and m is None:
             self._drain()
             self._json(404, {"error": "not found"})
             return
         try:
             body = self._write_body()
-            if m is None:
+            if path == _QUICK:
+                claim = self._quick(body)
+                if claim is None:
+                    self._json(200, {"claim": None})
+                else:
+                    self._json(201, {"claim": claim.to_json()})
+            elif m is None:
                 claim = self._create(body)
                 self._json(201, {"claim": claim.to_json()})
             else:
@@ -291,19 +299,33 @@ class _Handler(BaseHTTPRequestHandler):
             raise ClaimError(400, "unknown field")
         user = _field(d, "user", lambda v: isinstance(v, str))
         gpu = _field(d, "gpu", _is_int)
-        vram_gib = _field(d, "vram_gib", _is_gib)
+        # VRAM is optional: absent or null books the whole card.
+        vram_gib = None if d.get("vram_gib") is None else _field(d, "vram_gib", _is_gib)
         start = parse_time(_field(d, "start", lambda v: isinstance(v, str)))
         end = parse_time(_field(d, "end", lambda v: isinstance(v, str)))
         note = d.get("note")
         if note is not None and not isinstance(note, str):
             raise ClaimError(400, "missing or invalid field 'note'")
-        return self._store().create(user=user, gpu=gpu, vram_mib=round(vram_gib * MIB_PER_GIB),
+        card_mib = self._card_mib(gpu)
+        vram_mib = card_mib if vram_gib is None else round(vram_gib * MIB_PER_GIB)
+        return self._store().create(user=user, gpu=gpu, vram_mib=vram_mib,
                                     start=start, end=end, note=note,
                                     ip=self.client_address[0], now=self.server.clock(),
-                                    card_mib=self._card_mib(gpu))
+                                    card_mib=card_mib)
+
+    def _quick(self, d: dict):
+        if set(d) - set(_QUICK_FIELDS):
+            raise ClaimError(400, "unknown field")
+        user = _field(d, "user", lambda v: v is None or isinstance(v, str))
+        gpu = _field(d, "gpu", _is_int)
+        return self._store().quick(user=user, gpu=gpu, ip=self.client_address[0],
+                                   now=self.server.clock(), card_mib=self._card_mib(gpu))
 
     def _card_mib(self, gpu: int) -> int:
-        """The latest poll's total for this GPU; the default card size if there is none."""
+        """The latest poll's total for this GPU; the default card size if there is none
+        (or the GPU number is out of range, which the store then refuses with a 400)."""
+        if not 0 <= gpu < GPU_COUNT:
+            return DEFAULT_CARD_MIB
         try:
             conn = self._conn()
             try:

@@ -1,11 +1,11 @@
 import sqlite3
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from resourcemonitor.claims import (ClaimError, ClaimsStore, list_window_ro, load_active,
-                                     parse_time)
+                                     next_reset, parse_time)
 from tests.claims_fixture import FakeUsers, T0, book
 
 
@@ -213,3 +213,152 @@ def test_readers_fail_open_on_any_exception_class(store, tmp_path, capsys, monke
     assert load_active(path, T0 + timedelta(hours=1)) == []
     assert list_window_ro(path, T0, 14, 7) == []
     assert capsys.readouterr().out.count("claims unavailable: KeyError") == 2
+
+
+# ---------- quick booking (Task 8) ----------
+UTC = timezone.utc
+
+
+@pytest.mark.parametrize("now, expected", [
+    (datetime(2026, 10, 6, 6, 59, tzinfo=UTC), datetime(2026, 10, 6, 7, 0, tzinfo=UTC)),   # 08:59 CEST
+    (datetime(2026, 10, 6, 7, 0, tzinfo=UTC), datetime(2026, 10, 7, 7, 0, tzinfo=UTC)),    # 09:00 exactly
+    (datetime(2026, 10, 6, 21, 0, tzinfo=UTC), datetime(2026, 10, 7, 7, 0, tzinfo=UTC)),   # 23:00 CEST
+    (datetime(2026, 10, 24, 20, 0, tzinfo=UTC), datetime(2026, 10, 25, 8, 0, tzinfo=UTC)),  # CEST -> CET
+    (datetime(2026, 3, 28, 22, 0, tzinfo=UTC), datetime(2026, 3, 29, 7, 0, tzinfo=UTC)),   # CET -> CEST
+])
+def test_next_reset_is_the_next_0900_berlin_strictly_after_now(now, expected):
+    r = next_reset(now)
+    assert r == expected and r.utcoffset() == timedelta(0)
+
+
+TOMORROW_9 = datetime(2026, 10, 7, 7, 0, tzinfo=UTC)          # T0 is 14:00 Berlin
+
+
+def test_quick_books_the_whole_card_until_0900(store):
+    b = store.quick(user="dorian.zwanzig", gpu=3, ip="10.0.0.1", now=T0, card_mib=81559)
+    assert (b.user, b.gpu, b.vram_mib, b.kind, b.note) == ("dorian.zwanzig", 3, 81559, "quick", "quick booking")
+    assert b.start == T0 and b.end == TOMORROW_9
+    assert store.get(b.id) == b and b.to_json()["kind"] == "quick"
+
+
+def test_quick_replace_cancels_the_old_one_with_the_ip(store):
+    old = store.quick(user="dorian.zwanzig", gpu=3, ip="10.0.0.1", now=T0)
+    later = T0 + timedelta(minutes=10)
+    new = store.quick(user="andre.kliem", gpu=3, ip="10.0.0.2", now=later)
+    gone = store.get(old.id)
+    assert (gone.cancelled_at, gone.cancelled_ip) == (later, "10.0.0.2")
+    assert new.user == "andre.kliem" and new.cancelled_at is None
+    assert [b.id for b in load_active(store_path(store), later)] == [new.id]
+
+
+def store_path(store):
+    return store._conn.execute("PRAGMA database_list").fetchone()[2]
+
+
+def test_quick_release_and_release_when_none(store):
+    b = store.quick(user="dorian.zwanzig", gpu=3, ip="10.0.0.1", now=T0)
+    assert store.quick(user=None, gpu=3, ip="10.0.0.3", now=T0 + timedelta(minutes=1)) is None
+    assert store.get(b.id).cancelled_ip == "10.0.0.3"
+    assert store.quick(user=None, gpu=3, ip="10.0.0.3", now=T0 + timedelta(minutes=2)) is None
+
+
+def test_quick_leaves_other_gpus_alone(store):
+    other = store.quick(user="dorian.zwanzig", gpu=2, ip="10.0.0.1", now=T0)
+    store.quick(user=None, gpu=3, ip="10.0.0.1", now=T0)
+    assert store.get(other.id).cancelled_at is None
+
+
+@pytest.mark.parametrize("kwargs, detail", [
+    ({"gpu": 8}, "GPU must be 0–7"),
+    ({"gpu": -1}, "GPU must be 0–7"),
+    ({"user": "Bad Name"}, "invalid user name"),
+    ({"user": "nobody.here"}, "unknown user 'nobody.here'"),
+])
+def test_quick_validation(store, kwargs, detail):
+    args = {"user": "dorian.zwanzig", "gpu": 3, "ip": "10.0.0.1", "now": T0, **kwargs}
+    assert _err(lambda: store.quick(**args)) == (400, detail)
+
+
+def test_quick_is_refused_while_a_calendar_booking_is_active(store):
+    cal = book(store, gpu=3, gib=10)
+    status, detail = _err(lambda: store.quick(user="andre.kliem", gpu=3, ip="x", now=T0))
+    assert (status, detail) == (409, "GPU 3 has calendar bookings — use the calendar")
+    assert _err(lambda: store.quick(user=None, gpu=3, ip="x", now=T0))[0] == 409
+    assert store.get(cal.id).cancelled_at is None
+
+
+def test_quick_end_is_clipped_to_a_future_calendar_booking(store):
+    book(store, gpu=3, gib=10, start=T0 + timedelta(hours=6), now=T0)
+    b = store.quick(user="andre.kliem", gpu=3, ip="x", now=T0)
+    assert b.end == T0 + timedelta(hours=6)
+    # The calendar booking is never overbooked: it starts exactly where the quick one ends.
+
+
+def test_quick_is_refused_when_less_than_a_minute_remains(store):
+    book(store, gpu=3, gib=10, start=T0 + timedelta(seconds=59), hours=1, now=T0)
+    status, detail = _err(lambda: store.quick(user="andre.kliem", gpu=3, ip="x", now=T0))
+    assert (status, detail) == (409, "GPU 3 is booked from Tue 06 Oct 12:00 UTC — use the calendar")
+
+
+def test_quick_with_exactly_one_minute_is_allowed(store):
+    book(store, gpu=3, gib=10, start=T0 + timedelta(minutes=1), hours=1, now=T0)
+    assert store.quick(user="andre.kliem", gpu=3, ip="x", now=T0).end == T0 + timedelta(minutes=1)
+
+
+def test_create_still_makes_calendar_bookings(store):
+    assert book(store).kind == "calendar" and book(store, gpu=5).to_json()["kind"] == "calendar"
+
+
+_V1_SCHEMA = """
+CREATE TABLE claims (
+  id INTEGER PRIMARY KEY, user TEXT NOT NULL, gpu INTEGER NOT NULL CHECK (gpu BETWEEN 0 AND 7),
+  vram_mib INTEGER NOT NULL CHECK (vram_mib > 0), start TEXT NOT NULL, end TEXT NOT NULL,
+  note TEXT, created_at TEXT NOT NULL, created_ip TEXT NOT NULL, cancelled_at TEXT,
+  cancelled_ip TEXT);
+CREATE INDEX claims_gpu_window ON claims(gpu, start, end);
+INSERT INTO claims (user, gpu, vram_mib, start, end, note, created_at, created_ip)
+  VALUES ('dorian.zwanzig', 4, 40960, '2026-10-06T12:00:00+00:00', '2026-10-06T16:00:00+00:00',
+          NULL, '2026-10-06T12:00:00+00:00', '10.0.0.1');
+PRAGMA user_version = 1;
+"""
+
+
+def _v1(path):
+    conn = sqlite3.connect(path)
+    conn.executescript(_V1_SCHEMA)
+    conn.close()
+
+
+def test_version_1_file_reads_as_calendar_before_migration(tmp_path):
+    path = tmp_path / "v1.sqlite"
+    _v1(path)
+    (a,) = load_active(path, T0 + timedelta(hours=1))
+    (w,) = list_window_ro(path, T0, 14, 7)
+    assert a.kind == w.kind == "calendar"
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1   # readers never migrate
+    conn.close()
+
+
+def test_opening_a_version_1_file_migrates_it_to_version_2(tmp_path):
+    path = tmp_path / "v1.sqlite"
+    _v1(path)
+    s = ClaimsStore(path, users=FakeUsers())
+    try:
+        assert s.get(1).kind == "calendar" and s.get(1).user == "dorian.zwanzig"
+        assert [b.kind for b in s.list_window(T0)] == ["calendar"]
+    finally:
+        s.close()
+    conn = sqlite3.connect(path)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
+    assert "kind" in cols and conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()
+    ClaimsStore(path, users=FakeUsers()).close()                    # reopening is a no-op
+
+
+def test_new_files_are_created_at_version_2_with_kind(tmp_path):
+    ClaimsStore(tmp_path / "n.sqlite", users=FakeUsers()).close()
+    conn = sqlite3.connect(tmp_path / "n.sqlite")
+    assert "kind" in [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()
