@@ -29,9 +29,9 @@ Reach the box with `cwinkelmann@10.188.1.1` (the hostname `carrot` does not reso
 ## Running
 
 ```
-python3 -m resourcemonitor once              # one pass, prints the payload (dry)
-python3 -m resourcemonitor watch --interval 60
-python3 -m resourcemonitor report            # energy report from the ledger; no polling
+~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor once              # one pass, prints the payload (dry)
+~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor watch --interval 60
+~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor report            # energy report from the ledger; no polling
 ```
 
 Dry-run is the default. Nothing reaches Slack unless `--post` is given, and `--post`

@@ -39,3 +39,5 @@ def test_web_unit_binds_the_lan_address_and_never_posts():
 def test_deploy_skill_covers_the_dashboard():
     body = (SKILLS / "deploy-resourcemonitor" / "SKILL.md").read_text()
     assert "resourcemonitor-web" in body and "8765" in body
+    assert "systemd-run --user --unit=resourcemonitor-soak" in body
+    assert "miniconda3/envs/resourcemonitor/bin/python" in body

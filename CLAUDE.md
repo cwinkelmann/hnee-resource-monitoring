@@ -18,8 +18,8 @@ The service runs in the `resourcemonitor` conda env (`~/miniconda3/envs/resource
 - **It runs on the host, outside Docker.** A rootless container rewrites every foreign
   UID to 65534, so attribution silently becomes `nobody`. Verified 2026-10-06; see the
   plan's Measured facts. Do not "containerise it for consistency".
-- **Stdlib only.** No requests, no pynvml, no venv — it must survive a shared box with
-  no maintenance.
+- **Stdlib only** — no third-party packages (no requests, no pynvml). It runs in the
+  `resourcemonitor` conda env by the user's choice, but needs nothing installed into it.
 - **Dry-run is the default.** `--post` is opt-in.
 - **The Slack webhook is a bearer credential.** It lives in `~/.config/resourcemonitor/env`
   at mode 0600, is read from the environment, and never appears in a log, a repr or a

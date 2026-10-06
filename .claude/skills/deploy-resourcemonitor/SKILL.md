@@ -57,14 +57,23 @@ Asking root for a uid→name table does not help — the UID is destroyed before
 4. **Dry run first, and read the output.**
 
    ```bash
-   ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && python3 -m resourcemonitor once'
+   ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && ~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor once'
    ```
 
    It prints the Slack payload instead of sending it. Confirm the alerts are ones you
-   would have wanted to receive. Leave it dry for a day before step 5 — the cost of a
+   would have wanted to receive. Leave it dry for a day before step 6 — the cost of a
    noisy first week is that the channel gets muted and the tool becomes useless.
 
-5. **Enable the unit**
+5. **Dry soak (writes history, never posts)** — leave this running while you watch the output:
+
+   ```bash
+   ssh cwinkelmann@10.188.1.1 'systemd-run --user --unit=resourcemonitor-soak --working-directory=/home/cwinkelmann/ResourceMonitor -p Restart=always -p RestartSec=30 -E PYTHONUNBUFFERED=1 /home/cwinkelmann/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor watch --interval 60'
+   ```
+
+   No `--post`. The dashboard only gets new data while either this soak or the real unit
+   is running `watch`: history is written by `watch`, never by `serve`.
+
+6. **Enable the unit**
 
    Before enabling, stop any dry-run transient unit and remove its state to avoid cooldowns silencing real incidents:
 
@@ -80,10 +89,12 @@ Asking root for a uid→name table does not help — the UID is destroyed before
      systemctl --user enable --now resourcemonitor'
    ```
 
-6. **Verify**
+7. **Verify**
 
    ```bash
    ssh cwinkelmann@10.188.1.1 'systemctl --user status resourcemonitor --no-pager | head -20'
+   ssh cwinkelmann@10.188.1.1 'systemctl --user status resourcemonitor-web --no-pager | head -12'
+   ssh cwinkelmann@10.188.1.1 'curl -s http://10.188.1.1:8765/healthz'
    ```
 
 ## When alerts stop arriving
