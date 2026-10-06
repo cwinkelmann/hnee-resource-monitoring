@@ -1,6 +1,8 @@
 """The only module that shells out. Everything else is pure."""
 from __future__ import annotations
 
+import os
+import pwd
 import subprocess
 from datetime import datetime, timezone
 
@@ -66,11 +68,49 @@ def _run(fields: str, query: str) -> str:
     ).stdout
 
 
+# Inside a user namespace the kernel rewrites every foreign UID to this value, and pwd
+# would resolve it to "nobody" -- a guess, not an attribution.
+_OVERFLOW_UID = 65534
+
+
+def _uid_of(pid: int) -> int | None:
+    try:
+        return os.stat(f"/proc/{pid}").st_uid
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return None       # exited between the nvidia-smi call and this read
+
+
+def _name_of_uid(uid: int) -> str | None:
+    if uid == _OVERFLOW_UID:
+        return None
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return None
+
+
+def owner_of(pid: int) -> str | None:
+    """Username that owns `pid`, or None if it cannot be established.
+
+    None is a real answer, not an error: the process may have exited, or this may be
+    running somewhere the UID does not resolve. Callers render None as "unattributed"
+    and never guess.
+    """
+    uid = _uid_of(pid)
+    if uid is None:
+        return None
+    return _name_of_uid(uid)
+
+
 def probe() -> Snapshot:
     gpu_text = _run(GPU_FIELDS, "gpu")
     apps_text = _run(APP_FIELDS, "compute-apps")
+    procs = tuple(
+        GpuProcess(p.pid, p.gpu_index, p.used_mib, owner_of(p.pid))
+        for p in parse_apps_query(apps_text, parse_gpu_uuids(gpu_text))
+    )
     return Snapshot(
         taken_at=datetime.now(timezone.utc),
         gpus=parse_gpu_query(gpu_text),
-        procs=parse_apps_query(apps_text, parse_gpu_uuids(gpu_text)),
+        procs=procs,
     )

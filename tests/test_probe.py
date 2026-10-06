@@ -64,3 +64,21 @@ def test_free_mib_is_total_minus_used():
 def test_empty_apps_query_means_no_processes_not_an_error():
     """An idle box returns an empty string; that is the common case, not a failure."""
     assert parse_apps_query("", {"GPU-ggg": 6}) == ()
+
+
+def test_parses_a_real_recording_from_the_gpu_host():
+    """Fixtures recorded from carrot; assert only structure, not volatile readings."""
+    from pathlib import Path
+    from resourcemonitor.probe import parse_gpu_uuids
+
+    fx = Path(__file__).parent / "fixtures"
+    gpu_text = (fx / "real_gpu_query.txt").read_text()
+    uuids = parse_gpu_uuids(gpu_text)
+    gpus = parse_gpu_query(gpu_text)
+    procs = parse_apps_query((fx / "real_apps_query.txt").read_text(), uuids)
+
+    assert len(gpus) == 8
+    assert sorted(g.index for g in gpus) == list(range(8))
+    assert all(g.power_w > 0 for g in gpus)
+    assert procs
+    assert all(p.gpu_index in range(8) for p in procs)
