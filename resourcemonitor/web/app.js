@@ -124,7 +124,13 @@
     setBusy(1);
     try {
       const r = await fetch(url, { cache: "no-store" });
-      if (r.status === 503) { setFailed(key, false); showEmpty(true); return null; }
+      if (r.status === 503) {
+        let body = null;
+        try { body = await r.json(); } catch (e) { /* not JSON: treat as no history */ }
+        // "busy" is transient: keep the page and retry on the next tick, do not blank it
+        if (body && body.error === "busy") throw new Error("busy");
+        setFailed(key, false); showEmpty(true); return null;
+      }
       if (!r.ok) throw new Error("HTTP " + r.status);
       const data = await r.json();
       setFailed(key, false);

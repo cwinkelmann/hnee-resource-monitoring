@@ -190,3 +190,49 @@ def test_existing_db_with_zero_polls_is_503_no_history(tmp_path, path):
         assert status == 503 and json.loads(body) == {"error": "no history yet"}
     finally:
         srv.shutdown()
+
+
+def test_idle_connections_time_out():
+    from resourcemonitor.web import _Handler
+    assert _Handler.timeout == 15
+
+
+class _Slots:
+    def __init__(self, free):
+        self.free, self.timeouts, self.released = free, [], 0
+
+    def acquire(self, blocking=True, timeout=None):
+        self.timeouts.append(timeout)
+        return self.free
+
+    def release(self):
+        self.released += 1
+
+
+@pytest.mark.parametrize("path", ["/api/timeline", "/api/usage", "/api/timeseries"])
+def test_heavy_queries_answer_busy_when_no_slot_frees_up(live, monkeypatch, path):
+    from resourcemonitor import web
+    slots = _Slots(free=False)
+    monkeypatch.setattr(web, "_QUERY_SLOTS", slots)
+    status, headers, body = _get(live + path)
+    assert status == 503 and json.loads(body) == {"error": "busy"}
+    assert headers["Content-Security-Policy"] == "default-src 'self'"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert slots.timeouts == [2] and slots.released == 0
+
+
+def test_heavy_queries_release_their_slot_and_now_is_not_gated(live, monkeypatch):
+    from resourcemonitor import web
+    slots = _Slots(free=True)
+    monkeypatch.setattr(web, "_QUERY_SLOTS", slots)
+    assert _get(live + "/api/timeline?hours=24")[0] == 200
+    assert _get(live + "/api/timeline?hours=0")[0] == 400      # bad input still releases
+    assert slots.released == len(slots.timeouts) == 2
+    assert _get(live + "/api/now")[0] == 200 and len(slots.timeouts) == 2
+
+
+def test_query_slots_are_a_bounded_semaphore_of_two():
+    import threading
+    from resourcemonitor import web
+    assert isinstance(web._QUERY_SLOTS, type(threading.BoundedSemaphore(2)))
+    assert web._QUERY_SLOTS._initial_value == 2

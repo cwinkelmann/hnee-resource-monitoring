@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import threading
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,11 @@ STATIC = {
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 MAX_USAGE_DAYS = 366
+# The scan-heavy endpoints share two slots, so a burst of page loads cannot pile up
+# SQLite scans on the shared box; a request that waits longer than this gets 503 busy.
+_HEAVY = frozenset({"/api/timeline", "/api/usage", "/api/timeseries"})
+_QUERY_SLOTS = threading.BoundedSemaphore(2)
+_BUSY_WAIT_S = 2
 
 
 class BadRequest(ValueError):
@@ -64,6 +70,7 @@ def _day(s: str) -> date:
 class _Handler(BaseHTTPRequestHandler):
     server: "_Server"
     server_version = "resourcemonitor"
+    timeout = 15                             # drop idle or slow-loris connections
     sys_version = ""
 
     def log_message(self, format, *args):   # no access logging
@@ -106,7 +113,17 @@ class _Handler(BaseHTTPRequestHandler):
             if handler is None:
                 self._json(404, {"error": "not found"})
                 return
-            handler(parts.query)
+            if path not in _HEAVY:
+                handler(parts.query)
+                return
+            slots = _QUERY_SLOTS
+            if not slots.acquire(timeout=_BUSY_WAIT_S):
+                self._json(503, {"error": "busy"})
+                return
+            try:
+                handler(parts.query)
+            finally:
+                slots.release()
         except BadRequest:
             self._json(400, {"error": "bad request"})
         except NoHistory:
