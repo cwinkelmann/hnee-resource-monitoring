@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Record every poll into a SQLite history and serve a read-only, unauthenticated LAN dashboard on carrot. It shows who is on which GPU now, plus kWh and GPU-hours per user over time.
+**Goal:** Record every poll into a SQLite history and serve a read-only, unauthenticated LAN dashboard on carrot. It shows **who does what when**: who is on which GPU now and what they're running, a per-GPU timeline of jobs, and kWh and GPU-hours per user over time.
 
 **Architecture:** The existing `watch` service appends one transaction per poll to `history.sqlite` (WAL mode). A separate `serve` process, running in its own systemd user unit, opens that file **read-only** (`mode=ro`). It serves one static HTML/JS/CSS page plus a small JSON API on stdlib `ThreadingHTTPServer`. The web process never imports `probe` or `notify`.
 
@@ -20,7 +20,7 @@
 - **Reserved bucket names:** `"(idle)"` and `"(unattributed)"`. Parentheses cannot occur in Linux usernames, so these can never collide with a user.
 - **Timestamps:** UTC ISO-8601 strings from `snap.taken_at.isoformat()`. Day and week grouping uses **UTC days**, and ISO weeks start Monday. The page labels this "UTC".
 - **No auth.** This was the user's explicit choice; the page is visible to the LAN. Bind defaults to `127.0.0.1`; the deployed unit passes `--bind 10.188.1.1 --port 8765`.
-- **Fixed routes only.** `/`, `/app.js`, `/app.css`, `/api/now`, `/api/usage`, `/api/timeseries`, `/healthz`. GET only: any other method gets 405, any other path gets 404. Request input is never used as a file path.
+- **Fixed routes only.** `/`, `/app.js`, `/app.css`, `/api/now`, `/api/usage`, `/api/timeseries`, `/api/timeline`, `/healthz`. GET only: any other method gets 405, any other path gets 404. Request input is never used as a file path.
 - **Response headers on every response:** `Content-Security-Policy: default-src 'self'` and `X-Content-Type-Options: nosniff`. No CORS headers. Because of the CSP, **no inline `<script>` or `<style>`** may appear in index.html.
 - **Bad query parameters get a 400** with body `{"error": "bad request"}`, never a traceback. Ranges are capped: `/api/usage` needs `from <= to` and spans at most 366 days; `/api/timeseries` `hours` must be in 1..168.
 - **No per-request access logging.** Override `log_message` to stay silent. Errors are printed by exception class only.
@@ -29,11 +29,11 @@
 
 ## Review Focus
 
-1. **Fresh install, no `history.sqlite` yet (or an empty one).** `/api/now` and `/api/usage` return 503 `{"error": "no history yet"}`, never a 500. The page shows "No data yet — is the monitor running?". Tested in Task 5.
-2. **Monitor stopped.** The latest poll is older than `stale_after_s`, so `/api/now` returns `"stale": true` and the page shows a red "monitor not running since …" banner. Tested in Task 5.
-3. **Gaps in the history** (service was down). `/api/usage` coverage is below 1.0 and nothing is interpolated. Tested in Task 4.
-4. **Hostile or odd query params** (`from=2026-13-45`, `hours=-1`, `hours=abc`, `by=month`, a range over 366 days) get a 400 with no traceback. Tested in Task 5.
-5. **Unattributed process (user None) and HTML-looking text.** The API emits `null`, and the page renders the literal text "unattributed" and only ever uses `textContent`, never `innerHTML`, for data. Tested in Task 4 (API) and Task 6 (static check on app.js).
+1. **Fresh install, no `history.sqlite` yet (or an empty one).** `/api/now` and `/api/usage` return 503 `{"error": "no history yet"}`, never a 500. The page shows "No data yet — is the monitor running?". Tested in Task 6.
+2. **Monitor stopped.** The latest poll is older than `stale_after_s`, so `/api/now` returns `"stale": true` and the page shows a red "monitor not running since …" banner. Tested in Task 6.
+3. **Gaps in the history** (service was down). `/api/usage` coverage is below 1.0 and nothing is interpolated. Tested in Task 5.
+4. **Hostile or odd query params** (`from=2026-13-45`, `hours=-1`, `hours=abc`, `by=month`, a range over 366 days) get a 400 with no traceback. Tested in Task 6.
+5. **Unattributed process (user None) and HTML-looking text.** The API emits `null`, and the page renders the literal text "unattributed" and only ever uses `textContent`, never `innerHTML`, for data. Tested in Task 5 (API) and Task 7 (static check on app.js).
 
 ---
 
@@ -157,7 +157,99 @@ git commit -m "feat(energy): accumulate() returns the per-interval breakdown row
 
 ---
 
-### Task 2: History writer
+### Task 2: Process labels — the "what" in who-does-what-when
+
+**Files:**
+- Modify: `resourcemonitor/model.py`, `resourcemonitor/probe.py`
+- Test: `tests/test_probe.py`, `tests/test_owner.py`
+
+**Interfaces:**
+- Produces:
+  - `GpuProcess` gains a last field `name: str | None = None`, a short human label. It keeps its default, so every existing 3- and 4-argument construction still works.
+  - `APP_FIELDS = "gpu_uuid,pid,used_memory,process_name"`.
+  - `parse_apps_query` accepts lines with **4 fields** (it sets `name` from the raw `process_name`) and still accepts the legacy **3-field** lines (`name=None`). Split with `line.split(",", 3)`, because a process path may contain commas. `[N/A]` or empty process names give `None`.
+  - `label_for(name: str | None, cmdline: list[str] | None) -> str | None` is a **pure** function that builds the short label:
+    - If `cmdline` is non-empty and the basename of `cmdline[0]` matches `python`, `python3` or `python3.N`: return `"python -m <module>"` when `-m <module>` is present. Otherwise return `"python <basename of the first argument ending in .py>"`. Otherwise return `"python"`.
+    - Otherwise, if `name` is set, return the basename of `name` (`/opt/kev/.venv/bin/python` gives `python`; `VLLM::Worker_TP0` stays as is).
+    - Otherwise return the basename of `cmdline[0]`, or `None`.
+    - Truncate the result to 60 characters.
+    - **Never include any other argument.** The page is unauthenticated on the LAN, and arguments can contain tokens, paths or data names.
+  - `cmdline_of(pid: int) -> list[str] | None` reads `/proc/<pid>/cmdline` and splits on NUL. It returns `None` on `FileNotFoundError`, `PermissionError`, `ProcessLookupError` or `OSError`.
+  - `probe()` fills `name=label_for(p.name, cmdline_of(p.pid))` for each process.
+
+- [ ] **Step 1: Write the failing tests** (append to `tests/test_probe.py`)
+
+```python
+from resourcemonitor.probe import label_for, parse_apps_query
+
+
+def test_apps_query_reads_the_process_name_column():
+    procs = parse_apps_query("GPU-ggg, 3578603, 77014 MiB, VLLM::Worker_TP0\n", {"GPU-ggg": 0})
+    assert procs[0].name == "VLLM::Worker_TP0" and procs[0].used_mib == 77014
+
+
+def test_apps_query_still_accepts_the_three_column_format():
+    procs = parse_apps_query("GPU-ggg, 3078913, 22706 MiB\n", {"GPU-ggg": 6})
+    assert procs[0].name is None and procs[0].pid == 3078913
+
+
+def test_a_comma_in_the_process_path_does_not_break_parsing():
+    procs = parse_apps_query("GPU-ggg, 7, 10 MiB, /opt/a,b/python\n", {"GPU-ggg": 1})
+    assert procs[0].name == "/opt/a,b/python"
+
+
+def test_label_shows_the_python_script_but_no_arguments():
+    cmd = ["/opt/kev/.venv/bin/python", "/app/scripts/kev_run.py", "_train_epochs",
+           "--token", "SECRET123", "--batch", "8"]
+    assert label_for("/opt/kev/.venv/bin/python", cmd) == "python kev_run.py"
+
+
+def test_label_shows_python_module():
+    assert label_for("python", ["python3.12", "-m", "vllm.entrypoints.openai.api_server",
+                                "--api-key", "SECRET"]) == "python -m vllm.entrypoints.openai.api_server"
+
+
+def test_label_falls_back_to_the_nvidia_process_name():
+    assert label_for("VLLM::Worker_TP0", ["VLLM::Worker_TP0"]) == "VLLM::Worker_TP0"
+    assert label_for("/usr/bin/blender", None) == "blender"
+    assert label_for(None, None) is None
+
+
+def test_label_is_capped_at_60_chars():
+    assert len(label_for("x" * 200, None)) == 60
+```
+
+Append to `tests/test_owner.py`:
+
+```python
+def test_cmdline_of_a_dead_pid_is_none():
+    from resourcemonitor.probe import cmdline_of
+    assert cmdline_of(2 ** 22) is None
+```
+
+- [ ] **Step 2: Run them and watch them fail.** Run `python3 -m pytest tests/test_probe.py tests/test_owner.py -v`. Expected: `ImportError: cannot import name 'label_for'`.
+- [ ] **Step 3: Implement** per the Interfaces block. The existing real-fixture test (`real_apps_query.txt`, 3 columns) must keep passing unchanged.
+- [ ] **Step 4: Run** `python3 -m pytest -q`. Expected: all pass.
+- [ ] **Step 5: Verify on carrot** (read-only; SSH authorized). Sync with `rsync -a --exclude .git --exclude .superpowers --exclude __pycache__ --exclude .idea --exclude .pytest_cache --exclude .claude/settings.local.json ./ cwinkelmann@10.188.1.1:~/ResourceMonitor/`. Then run:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && ~/miniconda3/envs/resourcemonitor/bin/python -c "
+from resourcemonitor.probe import probe
+for p in sorted(probe().procs, key=lambda p: p.gpu_index): print(p.gpu_index, p.pid, p.user, p.name, p.used_mib)
+"'
+```
+
+  Expected: each line shows a user and a short label such as `python kev_run.py` or `VLLM::Worker_TP0`, never an argument. Paste the output in the report. Do **not** restart any unit.
+- [ ] **Step 6: Commit**
+
+```bash
+git add resourcemonitor/model.py resourcemonitor/probe.py tests/test_probe.py tests/test_owner.py
+git commit -m "feat(probe): short process labels (what is running), never full command lines"
+```
+
+---
+
+### Task 3: History writer
 
 **Files:**
 - Create: `resourcemonitor/history.py`
@@ -165,7 +257,7 @@ git commit -m "feat(energy): accumulate() returns the per-interval breakdown row
 - Test: `tests/test_history.py`
 
 **Interfaces:**
-- Consumes: `Snapshot`, `GpuState`, `GpuProcess` (model.py); `EnergyRow` (Task 1); `Alert(kind, key, text, gpu_index, user)` (rules.py).
+- Consumes: `Snapshot`, `GpuState`, `GpuProcess(pid, gpu_index, used_mib, user=None, name=None)` (model.py, `name` from Task 2); `EnergyRow` (Task 1); `Alert(kind, key, text, gpu_index, user)` (rules.py).
 - Produces:
   - `SCHEMA_VERSION = 1`
   - `class HistoryWriter:`
@@ -181,7 +273,7 @@ CREATE TABLE IF NOT EXISTS gpu_samples (ts TEXT NOT NULL, gpu INTEGER NOT NULL,
   total_mib INTEGER NOT NULL, used_mib INTEGER NOT NULL, util_pct INTEGER NOT NULL,
   power_w REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS proc_samples (ts TEXT NOT NULL, gpu INTEGER NOT NULL,
-  pid INTEGER NOT NULL, user TEXT, used_mib INTEGER NOT NULL);
+  pid INTEGER NOT NULL, user TEXT, used_mib INTEGER NOT NULL, name TEXT);
 CREATE TABLE IF NOT EXISTS energy_samples (ts TEXT NOT NULL, gpu INTEGER NOT NULL,
   bucket TEXT NOT NULL, kwh REAL NOT NULL, seconds REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS alerts (ts TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
@@ -193,9 +285,9 @@ CREATE INDEX IF NOT EXISTS alerts_ts ON alerts(ts);
 ```
 
   - `tests/history_fixture.py` provides `build_history(path, start: datetime, hours: int, interval_s: int = 300, gap: tuple[datetime, datetime] | None = None) -> None`. It drives a real `EnergyLedger(max_gap_s=interval_s*5)` and a real `HistoryWriter` over synthetic snapshots:
-    - 8 GPUs; GPUs 6 and 7 held by `"dorian.zwanzig"` at ~575 W / 100 %.
-    - GPU 5 held by `"cwinkelmann"` at 300 W / 60 % during even hours, idle (66 W) otherwise.
-    - GPU 4 holds an unattributed process (user None, 2048 MiB) at 70 W / 0 %.
+    - 8 GPUs; GPUs 6 and 7 held by `"dorian.zwanzig"` at ~575 W / 100 % (name `"python kev_run.py"`; GPU 6 restarts with a **new pid** every 6 hours so the timeline has several jobs).
+    - GPU 5 held by `"cwinkelmann"` (name `"python train.py"`) at 300 W / 60 % during even hours, idle (66 W) otherwise.
+    - GPU 4 holds an unattributed process (user None, name None, 2048 MiB) at 70 W / 0 %.
     - GPUs 0–3 idle at 66 W.
     - Every poll records one allocation Alert for dorian on GPU 6 (`sent` only on the first poll).
     - Polls inside `gap` are skipped (so the ledger returns `dt_s=None` after it).
@@ -217,7 +309,8 @@ T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 
 def _snap(t):
     return Snapshot(t, (GpuState(6, 81559, 22715, 100, 575.0),),
-                    (GpuProcess(42, 6, 22706, "dorian.zwanzig"), GpuProcess(43, 6, 9, None)))
+                    (GpuProcess(42, 6, 22706, "dorian.zwanzig", "python kev_run.py"),
+                     GpuProcess(43, 6, 9, None, None)))
 
 
 def _rows(db, sql):
@@ -234,7 +327,8 @@ def test_record_writes_one_transaction_across_all_tables(tmp_path):
 
     assert _rows(db, "SELECT ts, dt_s FROM polls") == [(T0.isoformat(), 60.0)]
     assert _rows(db, "SELECT gpu, used_mib, util_pct, power_w FROM gpu_samples") == [(6, 22715, 100, 575.0)]
-    assert sorted(_rows(db, "SELECT pid, user FROM proc_samples")) == [(42, "dorian.zwanzig"), (43, None)]
+    assert sorted(_rows(db, "SELECT pid, user, name FROM proc_samples"), key=lambda r: r[0]) == \
+        [(42, "dorian.zwanzig", "python kev_run.py"), (43, None, None)]
     assert _rows(db, "SELECT bucket, kwh, seconds FROM energy_samples") == [("dorian.zwanzig", 0.0096, 60.0)]
     assert _rows(db, "SELECT kind, gpu, user, sent FROM alerts") == [("allocation", 6, "dorian.zwanzig", 1)]
 
@@ -303,14 +397,14 @@ git commit -m "feat(history): SQLite history writer with daily retention pruning
 
 ---
 
-### Task 3: Wire history into `watch`
+### Task 4: Wire history into `watch`
 
 **Files:**
 - Modify: `resourcemonitor/cli.py`
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: `HistoryWriter` (Task 2); `EnergyLedger.accumulate -> (dt_s, rows)` (Task 1).
+- Consumes: `HistoryWriter` (Task 3); `EnergyLedger.accumulate -> (dt_s, rows)` (Task 1).
 - Produces:
   - `run_once(pol, state, notifier, tracker, ledger, host, energy_path, history=None) -> int`. When `history` is not None, after `state.save()` it calls `history.record(snap, dt_s, rows, alerts, {a.key for a in fresh})` inside `try/except (sqlite3.Error, OSError) as e: print(f"history write failed: {e.__class__.__name__}", flush=True)`.
   - New CLI flags: `--history PATH` (default `~/.local/state/resourcemonitor/history.sqlite`), `--no-history`, `--retention-days INT` (default 90). Only `watch` creates a `HistoryWriter`; `once` and `report` never write history.
@@ -362,19 +456,19 @@ git commit -m "feat(cli): watch records every poll to history; failures never st
 
 ---
 
-### Task 4: Read-only queries
+### Task 5: Read-only queries
 
 **Files:**
 - Create: `resourcemonitor/queries.py`
 - Test: `tests/test_queries.py`
 
 **Interfaces:**
-- Consumes: the schema (Task 2); `build_history` (Task 2); `IDLE_BUCKET`, `UNATTRIBUTED_BUCKET` (Task 1).
+- Consumes: the schema (Task 3); `build_history` (Task 3); `IDLE_BUCKET`, `UNATTRIBUTED_BUCKET` (Task 1).
 - Produces (all pure functions over an open connection; no HTTP, no clock except the explicit `now` argument):
   - `class NoHistory(Exception)`, raised when the file is missing or has no polls.
   - `open_ro(path) -> sqlite3.Connection`: `sqlite3.connect(f"file:{path}?mode=ro", uri=True)`. Raises `NoHistory` if the file does not exist.
   - `latest(conn, assignments: dict[str, frozenset[int]], now: datetime, stale_after_s: int) -> dict` returns:
-    `{"ts": str, "age_s": float, "stale": bool, "gpus": [{"gpu": int, "total_mib": int, "used_mib": int, "util_pct": int, "power_w": float, "assigned_to": str|None, "procs": [{"pid": int, "user": str|None, "used_mib": int}]}], "alerts": [{"kind","key","gpu","user","text","sent"}]}`. GPUs are sorted by index. `stale` is `age_s > stale_after_s`. Raises `NoHistory` if `polls` is empty.
+    `{"ts": str, "age_s": float, "stale": bool, "gpus": [{"gpu": int, "total_mib": int, "used_mib": int, "util_pct": int, "power_w": float, "assigned_to": str|None, "procs": [{"pid": int, "user": str|None, "name": str|None, "used_mib": int}]}], "alerts": [{"kind","key","gpu","user","text","sent"}]}`. GPUs are sorted by index. `stale` is `age_s > stale_after_s`. Raises `NoHistory` if `polls` is empty.
   - `usage(conn, start: date, end: date, by: str, now: datetime) -> dict` (`by` is `"day"` or `"week"`; `end` inclusive; days are UTC) returns:
     `{"from": "YYYY-MM-DD", "to": "YYYY-MM-DD", "by": by, "periods": [{"start": "YYYY-MM-DD", "kwh": {bucket: float}, "gpu_hours": {bucket: float}}], "totals": {"kwh": {bucket: float}, "gpu_hours": {bucket: float}}, "coverage": {"monitored_s": float, "elapsed_s": float, "ratio": float}, "caveats": [str, str]}`.
     - kWh is `SUM(kwh)`; GPU-hours is `SUM(seconds)/3600` from `energy_samples`, grouped by `substr(ts,1,10)` and bucket. Week periods merge days by ISO-week Monday.
@@ -382,6 +476,7 @@ git commit -m "feat(cli): watch records every poll to history; failures never st
     - Periods with no data are present, with empty dicts, so the chart's x-axis is continuous.
     - `caveats` are exactly the two strings in Global Constraints.
   - `timeseries(conn, hours: int, now: datetime, max_points: int = 300) -> dict` returns `{"gpus": {"0": [{"ts": str, "power_w": float, "util_pct": float}], ...}}`. It covers rows with `ts >= now - hours`. When a GPU has more than `max_points` rows, consecutive rows are averaged in equal-size chunks (`ceil(n/max_points)`) and each point carries the chunk's first `ts`.
+  - `timeline(conn, hours: int, now: datetime) -> dict` — **who does what when.** Returns `{"from": iso, "to": iso, "gpus": {"0": [job, ...], ..., "7": [...]}}`. Every GPU index seen in `gpu_samples` in the window is present (empty list if idle). A `job` is `{"pid": int, "user": str|None, "name": str|None, "start": iso, "end": iso, "max_mib": int, "ongoing": bool}`: the maximal run of **consecutive polls** (ordered by `polls.ts`) in which that `(gpu, pid)` appears. A run ends when a poll lacks the pid, **or** when the next poll has `dt_s IS NULL` (a monitoring gap, so a job that spans a gap is split, never bridged). `start`/`end` are the first/last poll timestamps of the run. `ongoing` is true when the run includes the latest poll overall. Only runs with at least one sample in `[now - hours, now]` are returned, sorted by `start`.
 
 - [ ] **Step 1: Write the failing tests** (`tests/test_queries.py`)
 
@@ -390,7 +485,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from resourcemonitor.queries import NoHistory, latest, open_ro, timeseries, usage
+from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timeseries, usage
 from tests.history_fixture import build_history
 
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
@@ -460,6 +555,29 @@ def test_gpu_hours_for_two_full_gpus_over_a_day(db):
     assert 47.0 < u["totals"]["gpu_hours"]["dorian.zwanzig"] <= 48.0   # GPUs 6+7 × 24 h
 
 
+def test_timeline_shows_who_did_what_when(tmp_path):
+    p = tmp_path / "h.sqlite"
+    build_history(p, T0, hours=48)
+    tl = timeline(open_ro(p), hours=48, now=T0 + timedelta(hours=48))
+    g6 = tl["gpus"]["6"]
+    assert len(g6) == 8                                      # new pid every 6 h
+    assert {(j["user"], j["name"]) for j in g6} == {("dorian.zwanzig", "python kev_run.py")}
+    assert [j["ongoing"] for j in g6] == [False] * 7 + [True]
+    assert all(j["start"] < j["end"] for j in g6)
+    assert tl["gpus"]["4"][0]["user"] is None                # unattributed stays null
+    assert tl["gpus"]["0"] == []                              # idle GPU present, no jobs
+
+
+def test_timeline_splits_a_job_at_a_monitoring_gap(db):
+    tl = timeline(open_ro(db), hours=48, now=T0 + timedelta(hours=48))
+    assert len(tl["gpus"]["7"]) == 2                          # one pid, but the 6 h gap splits it
+
+
+def test_timeline_window_excludes_old_jobs(db):
+    tl = timeline(open_ro(db), hours=1, now=T0 + timedelta(hours=48))
+    assert len(tl["gpus"]["6"]) == 1
+
+
 def test_timeseries_is_downsampled(db):
     ts = timeseries(open_ro(db), hours=48, now=T0 + timedelta(hours=48), max_points=50)
     assert set(ts["gpus"]) == {str(i) for i in range(8)}
@@ -473,27 +591,28 @@ def test_timeseries_is_downsampled(db):
 
 ```bash
 git add resourcemonitor/queries.py tests/test_queries.py
-git commit -m "feat(queries): read-only history queries for now, usage and timeseries"
+git commit -m "feat(queries): read-only history queries for now, timeline, usage and timeseries"
 ```
 
 ---
 
-### Task 5: HTTP server and `serve` mode
+### Task 6: HTTP server and `serve` mode
 
 **Files:**
 - Create: `resourcemonitor/web.py`
-- Create: `resourcemonitor/web/index.html`, `resourcemonitor/web/app.js`, `resourcemonitor/web/app.css` (minimal placeholders in this task: index.html links app.css and app.js and contains `<main id="app"></main>`; Task 6 fills them)
+- Create: `resourcemonitor/web/index.html`, `resourcemonitor/web/app.js`, `resourcemonitor/web/app.css` (minimal placeholders in this task: index.html links app.css and app.js and contains `<main id="app"></main>`; Task 7 fills them)
 - Modify: `resourcemonitor/cli.py`
 - Test: `tests/test_web.py`
 
 **Interfaces:**
-- Consumes: `open_ro`, `latest`, `usage`, `timeseries`, `NoHistory` (Task 4); `load_policy` (policy.py).
+- Consumes: `open_ro`, `latest`, `usage`, `timeseries`, `timeline`, `NoHistory` (Task 5); `load_policy` (policy.py).
 - Produces:
   - `make_server(bind: str, port: int, history_path: Path, policy_path: Path, stale_after_s: int = 180, clock=lambda: datetime.now(timezone.utc)) -> ThreadingHTTPServer`. `port=0` is allowed in tests.
   - CLI: mode `serve` with `--bind` (default `127.0.0.1`), `--port` (default 8765), `--stale-after` (default 180), and the existing `--history` and `--policy`. `serve` must not require `SLACK_WEBHOOK_URL`, must not construct a `Notifier`/`State`/`EnergyLedger`, and must not import probe or notify at module level in `web.py`. In `cli.main`, dispatch `serve` **before** any notifier/state setup.
   - Routes and status codes exactly as in Global Constraints:
     - `/api/usage` takes `from`, `to` (YYYY-MM-DD; defaults: to = today UTC, from = to − 13 days) and `by` (`day`|`week`, default `day`).
-    - `/api/timeseries` takes `hours` (default 24).
+    - `/api/timeseries` takes `hours` (default 24, 1..168).
+    - `/api/timeline` takes `hours` (default 24, **1..720**, i.e. up to 30 days).
     - `/healthz` returns `{"ok": true, "age_s": float}`, or 503 `{"ok": false}` when there is no history.
     - Policy is read per request. If the policy file is unreadable, `assigned_to` is null for every GPU (no 500).
   - Static files are read from `Path(__file__).parent / "web" / <fixed name>` with content types `text/html; charset=utf-8`, `text/javascript; charset=utf-8` and `text/css; charset=utf-8`.
@@ -578,11 +697,18 @@ def test_api_usage_defaults_and_params(live):
 @pytest.mark.parametrize("q", [
     "/api/usage?from=2026-13-45", "/api/usage?by=month", "/api/usage?from=2020-01-01&to=2026-10-06",
     "/api/usage?from=2026-10-06&to=2026-10-01", "/api/timeseries?hours=-1",
-    "/api/timeseries?hours=abc", "/api/timeseries?hours=169"])
+    "/api/timeseries?hours=abc", "/api/timeseries?hours=169",
+    "/api/timeline?hours=0", "/api/timeline?hours=721"])
 def test_bad_params_are_400_without_a_traceback(live, q):
     status, _, body = _get(live + q)
     assert status == 400 and json.loads(body) == {"error": "bad request"}
     assert b"Traceback" not in body
+
+
+def test_api_timeline_returns_jobs_per_gpu(live):
+    status, _, body = _get(live + "/api/timeline?hours=48")
+    d = json.loads(body)
+    assert status == 200 and d["gpus"]["6"] and d["gpus"]["6"][0]["name"] == "python kev_run.py"
 
 
 def test_unknown_path_is_404_and_post_is_405(live):
@@ -644,14 +770,14 @@ git commit -m "feat(web): read-only HTTP server and JSON API (serve mode)"
 
 ---
 
-### Task 6: The page
+### Task 7: The page
 
 **Files:**
 - Modify: `resourcemonitor/web/index.html`, `resourcemonitor/web/app.js`, `resourcemonitor/web/app.css`
 - Test: `tests/test_web_static.py`
 
 **Interfaces:**
-- Consumes: the JSON shapes of `/api/now`, `/api/usage` and `/api/timeseries` (Task 4/5 Interfaces, exactly).
+- Consumes: the JSON shapes of `/api/now`, `/api/usage` and `/api/timeseries` (Task 6/6 Interfaces, exactly).
 - Produces: a single page with no inline script/style and no external URLs.
 
 **Design (decided in this plan):**
@@ -660,9 +786,14 @@ git commit -m "feat(web): read-only HTTP server and JSON API (serve mode)"
   - `GPU n` and `assigned to <user|—>`;
   - a VRAM bar (used/total, coloured by the holding user's colour);
   - `util %` and `W`;
-  - the process list as `user · MiB`, showing `unattributed` in italics when the user is null.
+  - the process list as `user · what · MiB` (what = `name`, omitted when null), showing `unattributed` in italics when the user is null.
   - A card where any process user differs from `assigned_to` (and is not null) gets a red border and an "outside allocation" tag.
   - Below the grid, the current alerts list shows each alert's icon by kind plus its text, with "(Slack: sent)" or "(Slack: in cooldown)" from `sent`.
+- **Timeline — who does what when** (directly under Now; refresh every 60 s): a Gantt chart in one SVG.
+  - **Layout.** One row per GPU, labelled `GPU n · assigned to <user|—>`. The x-axis is time, with sensible ticks (hours for 24 h, days for 7 d/30 d) in local time and a "now" marker. Range buttons are `24 h | 7 d | 30 d` (default 24 h).
+  - **Bars.** One bar per job from `start` to `end` (`ongoing` jobs extend to now with an open right edge), filled with the user's colour; unattributed is amber with a dashed outline. A bar whose user is non-null and differs from the GPU's `assigned_to` gets a red outline. The label inside the bar is `user · name` when it fits (≥ 120 px), otherwise none.
+  - **Tooltip.** Every bar has an SVG `<title>` child with user (or "unattributed"), what (name or "unknown"), pid, local start–end, duration ("3 h 12 min") and peak VRAM. Set it with `textContent`.
+  - **Legend.** A legend of user colours sits under the chart.
 - **Usage** (fetch on load and when controls change; refresh every 5 min):
   - controls: range buttons `7 d | 30 d | 90 d` (default 7 d) and a toggle `by day | by week`;
   - a stacked-bar SVG chart of kWh per period, stacked by bucket;
@@ -702,11 +833,11 @@ def test_data_never_goes_through_innerHTML():
 
 def test_page_has_the_three_sections_and_caveat_slot():
     html = (WEB / "index.html").read_text()
-    for id_ in ("now", "usage", "timeseries", "caveats", "stale-banner"):
+    for id_ in ("now", "timeline", "usage", "timeseries", "caveats", "stale-banner"):
         assert f'id="{id_}"' in html
 ```
 
-- [ ] **Step 2: Run them and watch them fail** (the placeholder from Task 5 lacks the section ids).
+- [ ] **Step 2: Run them and watch them fail** (the placeholder from Task 6 lacks the section ids).
 - [ ] **Step 3: Implement** the three files per the design above.
 - [ ] **Step 4: Run** `python3 -m pytest -q`. Expected: all pass.
 - [ ] **Step 5: Local visual check.** Build a preview DB and run the server:
@@ -716,25 +847,27 @@ python3 -c "from datetime import datetime,timezone,timedelta; from tests.history
 python3 -m resourcemonitor serve --history /tmp/rm-preview.sqlite --policy deploy/policy.example.toml --port 8765 --stale-after 100000
 ```
 
-  Open `http://127.0.0.1:8765` and confirm that all three sections render, the dark/light themes work, and there are no console errors. Then stop the server.
+  Open `http://127.0.0.1:8765` and confirm that all four sections render (Now, Timeline, Usage, Last 24 h), the dark/light themes work, and there are no console errors. Then stop the server.
 - [ ] **Step 6: Commit**
 
 ```bash
 git add resourcemonitor/web/ tests/test_web_static.py
-git commit -m "feat(web): dashboard page — live GPU cards, usage chart/table, 24 h sparklines"
+git commit -m "feat(web): dashboard page — live GPU cards, timeline, usage chart/table, 24 h sparklines"
 ```
 
 ---
 
-### Task 7: Deploy unit, docs, and rollout to carrot
+### Task 8: Deploy unit, docs, and rollout to carrot
 
 **Files:**
 - Create: `deploy/resourcemonitor-web.service`
-- Modify: `README.md`, `CLAUDE.md` (the project section only), `.claude/skills/deploy-resourcemonitor/SKILL.md`, `.claude/skills/gpu-energy-report/SKILL.md`
+- Modify: `deploy/resourcemonitor.service` (ExecStart only), `README.md`, `CLAUDE.md` (the project section only), `docs/superpowers/plans/2026-10-06-gpu-resource-monitor.md` ("Reaching carrot" interpreter paragraph only), `.claude/skills/deploy-resourcemonitor/SKILL.md`, `.claude/skills/gpu-energy-report/SKILL.md`
+
+**Interpreter change (user directive, 2026-10-06):** both services now run in the conda env `resourcemonitor` on carrot (`~/miniconda3/envs/resourcemonitor`, Python 3.12, created already). Both units use `ExecStart=%h/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor …`. Every doc that currently says the service must run on `/usr/bin/python3` ("do not fix it") must be updated to say: it runs in the `resourcemonitor` conda env by the user's choice; the code stays stdlib-only; and **if that env is removed or renamed, the monitor stops**, so recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`.
 - Test: `tests/test_skills_present.py` (extend)
 
 **Interfaces:**
-- Consumes: `serve` mode (Task 5); history default path (Task 3).
+- Consumes: `serve` mode (Task 6); history default path (Task 4).
 
 - [ ] **Step 1: Write the unit**
 
@@ -746,7 +879,7 @@ Description=GPU resource monitor dashboard (read-only, LAN, no auth)
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 -m resourcemonitor serve --bind 10.188.1.1 --port 8765
+ExecStart=%h/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor serve --bind 10.188.1.1 --port 8765
 WorkingDirectory=%h/ResourceMonitor
 Restart=always
 RestartSec=10
@@ -761,6 +894,13 @@ WantedBy=default.target
 - [ ] **Step 2: Failing test.** Extend `tests/test_skills_present.py`:
 
 ```python
+def test_both_units_run_in_the_conda_env():
+    for unit in ("resourcemonitor.service", "resourcemonitor-web.service"):
+        body = (ROOT / "deploy" / unit).read_text()
+        assert "ExecStart=%h/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor" in body, unit
+        assert "/usr/bin/python3" not in body, unit
+
+
 def test_web_unit_binds_the_lan_address_and_never_posts():
     unit = (ROOT / "deploy/resourcemonitor-web.service").read_text()
     assert "serve --bind 10.188.1.1 --port 8765" in unit
@@ -780,13 +920,16 @@ def test_deploy_skill_covers_the_dashboard():
 - [ ] **Step 4: Run** `python3 -m pytest -q`. Expected: all pass. Then commit:
 
 ```bash
-git add deploy/resourcemonitor-web.service README.md CLAUDE.md .claude/skills tests/test_skills_present.py
+git add deploy/ README.md CLAUDE.md docs/superpowers/plans/2026-10-06-gpu-resource-monitor.md .claude/skills tests/test_skills_present.py
 git commit -m "feat(deploy): dashboard systemd unit and docs"
 ```
 
 - [ ] **Step 5: Roll out to carrot** (SSH authorized; always `ssh -o BatchMode=yes cwinkelmann@10.188.1.1`). Never pass `--post` and never touch `~/.config/resourcemonitor/env`.
   1. `rsync -a --exclude .git --exclude .superpowers --exclude __pycache__ --exclude .idea --exclude .pytest_cache --exclude .claude/settings.local.json ./ cwinkelmann@10.188.1.1:~/ResourceMonitor/`
-  2. `systemctl --user restart resourcemonitor-soak`. The dry soak now writes history by default. Wait 3 minutes, then confirm `~/.local/state/resourcemonitor/history.sqlite` exists and `polls` has ≥2 rows (`/usr/bin/python3 -c` with sqlite3).
+  2. Replace the dry soak so it runs in the conda env and writes history:
+     - `systemctl --user stop resourcemonitor-soak`
+     - `systemd-run --user --unit=resourcemonitor-soak --working-directory=/home/cwinkelmann/ResourceMonitor -p Restart=always -p RestartSec=30 -E PYTHONUNBUFFERED=1 /home/cwinkelmann/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor watch --interval 60` (no `--post`).
+     Wait 3 minutes, then confirm that `~/.local/state/resourcemonitor/history.sqlite` exists, `polls` has ≥2 rows, and `proc_samples.name` is populated (`~/miniconda3/envs/resourcemonitor/bin/python -c` with sqlite3).
   3. Copy the web unit to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now resourcemonitor-web`.
   4. On carrot, run `curl -s http://10.188.1.1:8765/healthz` and `curl -s http://10.188.1.1:8765/api/now | head -c 400`, and paste the outputs.
   5. Report `systemctl --user status resourcemonitor-web --no-pager | head -12`.
