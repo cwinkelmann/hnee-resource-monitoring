@@ -101,7 +101,8 @@ def test_api_claims_lists_bookings_and_users_lists_the_directory(live):
 
 
 @pytest.mark.parametrize("q", ["/api/claims?days=15", "/api/claims?days=0", "/api/claims?days=x",
-                               "/api/claims?days=-1", "/api/claims?foo=1", "/api/users?x=1"])
+                               "/api/claims?days=-1", "/api/claims?days=" + "9" * 5000,
+                               "/api/claims?days=014", "/api/claims?foo=1", "/api/users?x=1"])
 def test_claims_and_users_bad_params_are_400(live, q):
     status, headers, body = _get(live + q)
     assert status == 400 and json.loads(body) == {"error": "bad request"}
