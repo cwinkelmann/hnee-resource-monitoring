@@ -362,3 +362,19 @@ def test_new_files_are_created_at_version_2_with_kind(tmp_path):
     assert "kind" in [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     conn.close()
+
+
+def test_calendar_booking_on_a_quick_held_card_names_the_holder(store):
+    store.quick(user="dorian.zwanzig", gpu=3, ip="x", now=T0)
+    status, detail = _err(lambda: book(store, user="andre.kliem", gpu=3, gib=10,
+                                       start=T0 + timedelta(hours=1)))
+    assert (status, detail) == (409, "GPU 3 is held by dorian.zwanzig until 09:00 "
+                                     "(quick booking) — set its holder to free first")
+
+
+def test_quick_hold_conflict_shows_the_clipped_end_in_berlin_time(store):
+    book(store, gpu=3, gib=10, start=T0 + timedelta(hours=2), hours=1, now=T0)   # 16:00 Berlin
+    store.quick(user="dorian.zwanzig", gpu=3, ip="x", now=T0)
+    status, detail = _err(lambda: book(store, user="andre.kliem", gpu=3, gib=10, hours=1))
+    assert (status, detail) == (409, "GPU 3 is held by dorian.zwanzig until 16:00 "
+                                     "(quick booking) — set its holder to free first")

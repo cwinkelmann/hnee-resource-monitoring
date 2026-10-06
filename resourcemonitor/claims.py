@@ -199,6 +199,14 @@ def _check_capacity(overlapping: list[Booking], gpu: int, vram_mib: int, start: 
         active = [b for b in overlapping if b.active_at(t)]
         booked = sum(b.vram_mib for b in active)
         if booked + vram_mib > card_mib:
+            held = [b for b in active if b.kind == "quick"]
+            if held:
+                # The holder name was validated when the quick booking was made. The end is
+                # shown as local Europe/Berlin wall-clock HH:MM, like the 09:00 reset.
+                h = held[0]
+                until = h.end.astimezone(ZoneInfo(QUICK_TZ)).strftime("%H:%M")
+                raise ClaimError(409, f"GPU {gpu} is held by {h.user} until {until} "
+                                      "(quick booking) — set its holder to free first")
             t2 = min(min(b.end for b in active), end)
             free = (card_mib - booked) / MIB_PER_GIB
             raise ClaimError(409, f"GPU {gpu} has only {free:.1f} GiB unbooked between "
