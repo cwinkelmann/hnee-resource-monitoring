@@ -113,3 +113,66 @@ def test_timeline_run_start_looks_back_before_the_window(db_nogap):
     assert job["start"] == (T0 + timedelta(hours=42)).isoformat()
     assert job["ongoing"] is True
     assert job["max_mib"] == 22715
+
+
+def test_open_ro_stays_read_only_for_paths_with_uri_characters(tmp_path):
+    import sqlite3
+    from resourcemonitor.history import HistoryWriter
+    d = tmp_path / "a?b#c%d"
+    d.mkdir()
+    HistoryWriter(d / "h.sqlite").close()
+    with pytest.raises(sqlite3.OperationalError):
+        open_ro(d / "h.sqlite").execute("CREATE TABLE x(a)")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a?b#c%d"]
+
+
+def test_usage_rejects_unknown_period(db):
+    with pytest.raises(ValueError):
+        usage(open_ro(db), date(2026, 10, 5), date(2026, 10, 6), "month", now=T0)
+
+
+def _mk(path, polls):
+    """polls: [(minute, dt_s, [(gpu, pid, mib)])] written straight into the schema."""
+    import sqlite3
+    from resourcemonitor.history import _SCHEMA
+    c = sqlite3.connect(path)
+    c.executescript(_SCHEMA)
+    for m, dt, procs in polls:
+        ts = (T0 + timedelta(minutes=m)).isoformat()
+        c.execute("INSERT INTO polls VALUES (?, ?)", (ts, dt))
+        for g in range(2):
+            c.execute("INSERT INTO gpu_samples VALUES (?, ?, 1, 1, 1, 1.0)", (ts, g))
+        for g, pid, mib in procs:
+            c.execute("INSERT INTO proc_samples VALUES (?, ?, ?, 'u', ?, 'n')", (ts, g, pid, mib))
+    c.commit()
+    c.close()
+
+
+def _runs(path, hours, now_min):
+    tl = timeline(open_ro(path), hours, T0 + timedelta(minutes=now_min))
+    return {g: [(j["pid"], j["start"][11:16], j["end"][11:16], j["max_mib"], j["ongoing"])
+                for j in js] for g, js in tl["gpus"].items()}
+
+
+@pytest.fixture(scope="module")
+def edge_db(tmp_path_factory):
+    p = tmp_path_factory.mktemp("edge") / "e.sqlite"
+    _mk(p, [(0, None, [(0, 5, 100)]), (1, 60, [(0, 5, 900)]), (2, 60, [(0, 5, 100)]),
+            (3, None, [(0, 5, 100)]), (4, 60, [(0, 5, 100)]),
+            (5, 60, [(1, 5, 100)]), (6, 60, []), (7, 60, [(1, 5, 50)])])
+    return p
+
+
+def test_timeline_edge_semantics(edge_db):
+    r = _runs(edge_db, 10, 8)
+    # gap poll at 00:03 splits the first pid-5 run; GPU 1 is a separate run; a
+    # pid that vanishes (06) and returns (07) makes two runs
+    assert r["0"] == [(5, "00:00", "00:02", 900, False), (5, "00:03", "00:04", 100, False)]
+    assert r["1"] == [(5, "00:05", "00:05", 100, False), (5, "00:07", "00:07", 50, True)]
+
+
+def test_timeline_lookback_stops_at_gap_and_takes_max_from_before_window(edge_db):
+    # window opens at 00:04; run starts at the gap poll 00:03 (it contains the pid)
+    assert _runs(edge_db, 1, 64)["0"] == [(5, "00:03", "00:04", 100, False)]
+    # window opens at 00:02: look-back reaches 00:01 (max 900) and stops at 00:00 gap poll
+    assert _runs(edge_db, 1, 62)["0"][0] == (5, "00:00", "00:02", 900, False)

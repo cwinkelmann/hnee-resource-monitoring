@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS alerts (ts TEXT NOT NULL, kind TEXT NOT NULL, key TEX
   gpu INTEGER, user TEXT, text TEXT NOT NULL, sent INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS gpu_samples_ts ON gpu_samples(ts);
 CREATE INDEX IF NOT EXISTS proc_samples_ts ON proc_samples(ts);
+CREATE INDEX IF NOT EXISTS proc_samples_gpu_pid_ts ON proc_samples(gpu, pid, ts);
+CREATE INDEX IF NOT EXISTS polls_gap ON polls(ts) WHERE dt_s IS NULL;
 CREATE INDEX IF NOT EXISTS energy_samples_ts ON energy_samples(ts);
 CREATE INDEX IF NOT EXISTS alerts_ts ON alerts(ts);
 """

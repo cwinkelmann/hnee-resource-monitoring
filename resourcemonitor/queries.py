@@ -19,9 +19,11 @@ class NoHistory(Exception):
 
 
 def open_ro(path: Path | str) -> sqlite3.Connection:
-    if not Path(path).exists():
+    path = Path(path)
+    if not path.exists():
         raise NoHistory(str(path))
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # as_uri() percent-encodes '?', '#' and '%', so they cannot leak into the query string.
+    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
 
 
 def latest(conn: sqlite3.Connection, assignments: dict[str, frozenset[int]],
@@ -55,6 +57,8 @@ def _monday(d: date) -> date:
 
 
 def usage(conn: sqlite3.Connection, start: date, end: date, by: str, now: datetime) -> dict:
+    if by not in ("day", "week"):
+        raise ValueError(f"by must be 'day' or 'week', not {by!r}")
     key = (lambda d: _monday(d)) if by == "week" else (lambda d: d)
     step = timedelta(days=7 if by == "week" else 1)
     periods: dict[date, dict] = {}
@@ -123,6 +127,44 @@ def _polls_with_procs(conn: sqlite3.Connection, where: str, params: tuple, order
         yield ts, group[0][1], [r[2:] for r in group if r[2] is not None]
 
 
+def _extend_back(conn: sqlite3.Connection, gpu: int, job: dict, first_ts: str) -> None:
+    """Move job['start'] back to the run's true first poll (it is open at `first_ts`)."""
+    pid = job["pid"]
+    # A run never reaches back past the latest gap poll (dt_s NULL) before `first_ts`.
+    gap = conn.execute("SELECT MAX(ts) FROM polls WHERE dt_s IS NULL AND ts < ?",
+                       (first_ts,)).fetchone()[0]
+    floor = gap if gap is not None else conn.execute("SELECT MIN(ts) FROM polls").fetchone()[0]
+    # Latest poll in [floor, first_ts) that lacks the pid: ordered index scans and a set
+    # difference, over a look-back range that grows 4x per step so short runs stay cheap.
+    first_dt = datetime.fromisoformat(first_ts)
+    width = timedelta(hours=1)
+    while True:
+        lo = max(floor, (first_dt - width).isoformat())
+        n_polls, n_seen = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM polls WHERE ts >= ?1 AND ts < ?2), "
+            "(SELECT COUNT(*) FROM proc_samples "
+            "WHERE gpu = ?3 AND pid = ?4 AND ts >= ?1 AND ts < ?2)",
+            (lo, first_ts, gpu, pid)).fetchone()
+        missing = None if n_polls == n_seen else conn.execute(
+            "SELECT MAX(ts) FROM (SELECT ts FROM polls WHERE ts >= ?1 AND ts < ?2 "
+            "EXCEPT SELECT ts FROM proc_samples "
+            "WHERE gpu = ?3 AND pid = ?4 AND ts >= ?1 AND ts < ?2)",
+            (lo, first_ts, gpu, pid)).fetchone()[0]
+        if missing is not None or lo == floor:
+            break
+        width *= 4
+    if missing is None:   # contiguous back to the floor: the gap poll (or first poll) starts it
+        start = floor
+    else:
+        start = conn.execute("SELECT MIN(ts) FROM polls WHERE ts > ?", (missing,)).fetchone()[0]
+    if start < first_ts:
+        top = conn.execute("SELECT MAX(used_mib) FROM proc_samples "
+                           "WHERE gpu = ? AND pid = ? AND ts >= ? AND ts < ?",
+                           (gpu, pid, start, first_ts)).fetchone()[0]
+        job["start"] = start
+        job["max_mib"] = max(job["max_mib"], top or 0)
+
+
 def timeline(conn: sqlite3.Connection, hours: int, now: datetime) -> dict:
     """Runs of consecutive polls per (gpu, pid), split at monitoring gaps (dt_s NULL)."""
     lo, hi = (now - timedelta(hours=hours)).isoformat(), now.isoformat()
@@ -157,19 +199,11 @@ def timeline(conn: sqlite3.Connection, hours: int, now: datetime) -> dict:
             job["user"], job["name"] = user, name
     close(list(open_runs))
 
-    # Runs open at the first in-window poll may have begun earlier: walk backwards.
+    # Runs open at the first in-window poll may have begun earlier: find each true start in SQL.
     if first_ts is not None and first_dt is not None:
-        pending = {(g, j["pid"]): j for g, j in done if j["start"] == first_ts}
-        if pending:
-            for ts, dt_s, procs in _polls_with_procs(conn, "p.ts < ?", (first_ts,), "DESC"):
-                present = {(gpu, pid): mib for gpu, pid, _u, _n, mib in procs}
-                for k in [k for k in pending if k not in present]:
-                    del pending[k]
-                for k, job in pending.items():
-                    job["start"] = ts
-                    job["max_mib"] = max(job["max_mib"], present[k])
-                if dt_s is None or not pending:
-                    break
+        for _g, job in done:
+            if job["start"] == first_ts:
+                _extend_back(conn, _g, job, first_ts)
 
     gpus: dict[str, list[dict]] = {str(g): [] for g in sorted(gpu_ids)}
     for g, job in sorted(done, key=lambda gj: (gj[1]["start"], gj[0], gj[1]["pid"])):
