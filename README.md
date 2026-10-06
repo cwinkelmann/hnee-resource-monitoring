@@ -73,7 +73,8 @@ estimate** when several users share a card (exact with a single process), not a 
 - **Now** — live per-GPU state, refreshed every 30 s.
 - **Timeline** — which user ran what on which GPU over time.
 - **Energy usage** — kWh per user and per day (UTC days), with idle and unattributed shown separately.
-- **Last 24 h** — power and utilisation per GPU.
+- **Power & utilisation — last 24 h** — power and utilisation per GPU.
+- **VRAM — last 24 h** — VRAM per GPU stacked by user, with the booked share as a dashed line (`/api/vram?hours=1..168`).
 
 It is **unauthenticated and visible to the whole LAN by choice**, and strictly **read-only**:
 the web process opens the history database with `mode=ro` and never imports probe or notify.

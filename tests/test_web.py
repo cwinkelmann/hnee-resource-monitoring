@@ -149,7 +149,9 @@ def test_api_usage_defaults_and_params(live):
     "/api/usage?from=2026-13-45", "/api/usage?by=month", "/api/usage?from=2020-01-01&to=2026-10-06",
     "/api/usage?from=2026-10-06&to=2026-10-01", "/api/timeseries?hours=-1",
     "/api/timeseries?hours=abc", "/api/timeseries?hours=169",
-    "/api/timeline?hours=0", "/api/timeline?hours=721"])
+    "/api/timeline?hours=0", "/api/timeline?hours=721",
+    "/api/vram?hours=0", "/api/vram?hours=169", "/api/vram?hours=abc", "/api/vram?hours=9999",
+    "/api/vram?hours=0024", "/api/vram?hours=", "/api/vram?hours=24&hours=24", "/api/vram?x=1"])
 def test_bad_params_are_400_without_a_traceback(live, q):
     status, _, body = _get(live + q)
     assert status == 400 and json.loads(body) == {"error": "bad request"}
@@ -165,6 +167,22 @@ def test_api_timeline_returns_jobs_per_gpu(live):
 def test_unknown_path_is_404_and_post_is_405(live):
     assert _get(live + "/../../etc/passwd")[0] == 404
     assert _get(live + "/api/now", method="POST")[0] == 405
+    assert _get(live + "/api/vram", method="POST")[0] == 405
+
+
+def test_api_vram_returns_stacked_vram_per_gpu(live):
+    status, headers, body = _get(live + "/api/vram")
+    d = json.loads(body)
+    assert status == 200 and set(d) == {"from", "to", "gpus"}
+    assert d["to"] == NOW.isoformat() and d["from"] == (NOW - timedelta(hours=24)).isoformat()
+    assert set(d["gpus"]) == {str(i) for i in range(8)}
+    g7 = d["gpus"]["7"]
+    assert g7["total_mib"] == 81559 and 0 < len(g7["points"]) <= 300
+    assert g7["points"][-1]["by_user"] == {"dorian.zwanzig": 22715 + 512}
+    assert d["gpus"]["4"]["points"][-1]["by_user"] == {"(unattributed)": 2048}
+    _assert_headers(headers)
+    status, _, body = _get(live + "/api/vram?hours=1")
+    assert status == 200 and len(json.loads(body)["gpus"]["7"]["points"]) == 12
 
 
 def test_fresh_install_without_history_is_503_not_500(tmp_path):
@@ -172,6 +190,9 @@ def test_fresh_install_without_history_is_503_not_500(tmp_path):
     try:
         status, _, body = _get(base + "/api/now")
         assert status == 503 and json.loads(body) == {"error": "no history yet"}
+        status, headers, body = _get(base + "/api/vram")
+        assert status == 503 and json.loads(body) == {"error": "no history yet"}
+        _assert_headers(headers)
         assert _get(base + "/healthz")[0] == 503
         assert _get(base + "/")[0] == 200                  # the page itself still loads
     finally:
@@ -255,7 +276,8 @@ def test_favicon_svg_is_served_and_favicon_ico_is_204(live):
         assert h["X-Content-Type-Options"] == "nosniff"
 
 
-@pytest.mark.parametrize("path", ["/api/usage", "/api/timeline", "/api/timeseries", "/api/now"])
+@pytest.mark.parametrize("path", ["/api/usage", "/api/timeline", "/api/timeseries", "/api/vram",
+                                  "/api/now"])
 def test_existing_db_with_zero_polls_is_503_no_history(tmp_path, path):
     from resourcemonitor.history import HistoryWriter
     HistoryWriter(tmp_path / "h.sqlite").close()
@@ -284,7 +306,7 @@ class _Slots:
         self.released += 1
 
 
-@pytest.mark.parametrize("path", ["/api/timeline", "/api/usage", "/api/timeseries"])
+@pytest.mark.parametrize("path", ["/api/timeline", "/api/usage", "/api/timeseries", "/api/vram"])
 def test_heavy_queries_answer_busy_when_no_slot_frees_up(live, monkeypatch, path):
     from resourcemonitor import web
     slots = _Slots(free=False)
