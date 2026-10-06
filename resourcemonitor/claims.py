@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
+DEFAULT_CLAIMS = Path.home() / ".local/state/resourcemonitor/claims.sqlite"
 MIB_PER_GIB = 1024
 DEFAULT_CARD_MIB = 81559
 MAX_DAYS = 14
