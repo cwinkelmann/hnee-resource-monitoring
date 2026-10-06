@@ -7,7 +7,8 @@ import urllib.request
 
 from resourcemonitor.rules import Alert
 
-ICON = {"allocation": ":no_entry_sign:", "idle": ":zzz:", "capacity": ":rotating_light:",
+ICON = {"booked_gpu": ":no_entry_sign:", "over_booking": ":chart_with_upwards_trend:",
+        "idle": ":zzz:", "capacity": ":rotating_light:",
         "unattributed": ":grey_question:", "report": ":zap:"}
 
 

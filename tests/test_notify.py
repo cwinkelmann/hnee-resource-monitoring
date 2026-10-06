@@ -4,7 +4,7 @@ import pytest
 from resourcemonitor.notify import Notifier, build_payload
 from resourcemonitor.rules import Alert
 
-A = Alert(kind="allocation", key="allocation:dorian.zwanzig:6", gpu_index=6,
+A = Alert(kind="booked_gpu", key="booking:other:dorian.zwanzig:6", gpu_index=6,
           user="dorian.zwanzig",
           text="dorian.zwanzig is using GPU 6 (22.2 GiB), which is assigned to cwinkelmann.")
 
@@ -50,3 +50,20 @@ def test_empty_alert_list_sends_nothing(monkeypatch):
 def test_new_kinds_have_their_own_icon():
     from resourcemonitor.notify import ICON
     assert ICON["unattributed"] and ICON["report"] == ":zap:"
+
+
+def test_every_alert_kind_produced_by_the_rules_has_an_icon():
+    """A kind without an icon falls back to a question mark, which hides what the alert is."""
+    import inspect
+    import re
+
+    from resourcemonitor import cli, rules
+    from resourcemonitor.notify import ICON
+
+    produced = set(re.findall(r'kind="([a-z_]+)"', inspect.getsource(rules)))
+    produced |= set(re.findall(r'kind="([a-z_]+)"', inspect.getsource(cli)))
+
+    assert {"over_booking", "booked_gpu", "idle", "capacity", "unattributed",
+            "report"} <= produced
+    assert produced <= set(ICON)
+    assert "allocation" not in ICON
