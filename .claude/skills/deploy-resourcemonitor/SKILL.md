@@ -131,7 +131,13 @@ ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'systemctl --user restart resourcemo
 
 The v1 -> v2 schema migration of `claims.sqlite` (adds the `kind` column; existing rows become
 `calendar`) happens automatically when the web process first opens the file for a booking
-write. There is no manual step; back up the file before the first restart if you want a copy.
+write. There is no manual step. To keep a copy first, note the file is in WAL mode: a plain `cp`
+of `claims.sqlite` can miss every row (they may still sit in `claims.sqlite-wal`). Use the
+SQLite backup API instead:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'cd ~/.local/state/resourcemonitor && ~/miniconda3/envs/resourcemonitor/bin/python -c "import sqlite3; s=sqlite3.connect(\"file:claims.sqlite?mode=ro\", uri=True); d=sqlite3.connect(\"claims.sqlite.bak\"); s.backup(d); d.close()"'
+```
 
 Pre-check before deploying: quick bookings ("holder" dropdown, until 09:00 Europe/Berlin) need
 the IANA time-zone database. Without system tzdata the `/api/claims/quick` route answers 500:
