@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from resourcemonitor.claims import ClaimsStore
 from resourcemonitor.web import make_server
+from tests.claims_fixture import FakeUsers, book
 from tests.history_fixture import build_history
 
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
@@ -25,12 +27,19 @@ channel = "#gpu-watch"
 """
 
 
-def _serve(tmp_path, with_history=True, now=NOW):
+def _serve(tmp_path, with_history=True, now=NOW, seed=False):
     hist = tmp_path / "h.sqlite"
     if with_history:
         build_history(hist, T0, hours=48)
     pol = tmp_path / "policy.toml"; pol.write_text(POLICY)
-    srv = make_server("127.0.0.1", 0, hist, pol, stale_after_s=600, clock=lambda: now)
+    claims = tmp_path / "claims.sqlite"
+    if seed:
+        store = ClaimsStore(claims, users=FakeUsers())
+        book(store, user="cwinkelmann", gpu=6, gib=40, start=NOW - timedelta(hours=1), hours=4,
+             now=NOW - timedelta(hours=1))
+        store.close()
+    srv = make_server("127.0.0.1", 0, hist, pol, stale_after_s=600, clock=lambda: now,
+                      claims_path=claims, users=FakeUsers())
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, f"http://127.0.0.1:{srv.server_address[1]}"
 
@@ -46,7 +55,7 @@ def _get(url, method="GET"):
 
 @pytest.fixture
 def live(tmp_path):
-    srv, base = _serve(tmp_path)
+    srv, base = _serve(tmp_path, seed=True)
     yield base
     srv.shutdown()
 
@@ -63,7 +72,53 @@ def test_index_and_assets_are_served_with_security_headers(live):
 def test_api_now_returns_live_view(live):
     status, _, body = _get(live + "/api/now")
     d = json.loads(body)
-    assert status == 200 and d["stale"] is False and d["gpus"][6]["assigned_to"] == "cwinkelmann"
+    assert status == 200 and d["stale"] is False and "assigned_to" not in d["gpus"][6]
+    g6 = d["gpus"][6]
+    assert [b["user"] for b in g6["bookings"]] == ["cwinkelmann"]
+    assert g6["booked_mib"] == 40960 and g6["free_mib"] == g6["total_mib"] - 40960
+    assert d["gpus"][5]["bookings"] == [] and d["gpus"][5]["free_mib"] == d["gpus"][5]["total_mib"]
+
+
+def _assert_headers(headers):
+    assert headers["Content-Security-Policy"] == "default-src 'self'"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Cache-Control"] == "no-store"
+    assert "Access-Control-Allow-Origin" not in headers
+
+
+def test_api_claims_lists_bookings_and_users_lists_the_directory(live):
+    status, headers, body = _get(live + "/api/claims")
+    d = json.loads(body)
+    assert status == 200 and d["now"] == NOW.isoformat()
+    assert [c["user"] for c in d["claims"]] == ["cwinkelmann"] and d["claims"][0]["gpu"] == 6
+    _assert_headers(headers)
+    status, headers, body = _get(live + "/api/claims?days=1")
+    assert status == 200 and len(json.loads(body)["claims"]) == 1
+    status, headers, body = _get(live + "/api/users")
+    assert status == 200 and json.loads(body) == {"users": sorted(FakeUsers().all())}
+    _assert_headers(headers)
+    _assert_headers(_get(live + "/api/now")[1])
+
+
+@pytest.mark.parametrize("q", ["/api/claims?days=15", "/api/claims?days=0", "/api/claims?days=x",
+                               "/api/claims?days=-1", "/api/claims?foo=1", "/api/users?x=1"])
+def test_claims_and_users_bad_params_are_400(live, q):
+    status, headers, body = _get(live + q)
+    assert status == 400 and json.loads(body) == {"error": "bad request"}
+    _assert_headers(headers)
+
+
+def test_missing_claims_file_means_no_bookings_not_an_error(tmp_path):
+    srv, base = _serve(tmp_path)
+    try:
+        status, headers, body = _get(base + "/api/claims")
+        assert status == 200 and json.loads(body)["claims"] == []
+        _assert_headers(headers)
+        status, headers, body = _get(base + "/api/now")
+        assert status == 200 and json.loads(body)["gpus"][6]["bookings"] == []
+        _assert_headers(headers)
+    finally:
+        srv.shutdown()
 
 
 def test_api_usage_defaults_and_params(live):
@@ -164,9 +219,11 @@ def test_cli_serve_delegates_to_the_web_entry_point(monkeypatch):
     seen = []
     monkeypatch.setattr(web, "main", lambda argv: seen.append(argv) or 0)
     assert cli.main(["serve", "--bind", "10.188.1.1", "--port", "9", "--stale-after", "5",
-                     "--history", "/x/h.sqlite", "--policy", "/x/p.toml"]) == 0
+                     "--history", "/x/h.sqlite", "--policy", "/x/p.toml",
+                     "--claims", "/x/c.sqlite"]) == 0
     assert seen == [["--bind", "10.188.1.1", "--port", "9", "--history", "/x/h.sqlite",
-                     "--policy", "/x/p.toml", "--stale-after", "5"]]
+                     "--policy", "/x/p.toml", "--stale-after", "5",
+                     "--claims", "/x/c.sqlite"]]
 
 
 def test_favicon_svg_is_served_and_favicon_ico_is_204(live):

@@ -78,7 +78,8 @@ def main(argv=None) -> int:
         from resourcemonitor import web
         return web.main(["--bind", args.bind, "--port", str(args.port),
                          "--history", str(args.history), "--policy", str(args.policy),
-                         "--stale-after", str(args.stale_after)])
+                         "--stale-after", str(args.stale_after),
+                         "--claims", str(args.claims)])
     pol = load_policy(args.policy)
     state = State.load(args.state)
     url = os.environ.get("SLACK_WEBHOOK_URL", "")

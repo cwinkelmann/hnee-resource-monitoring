@@ -262,23 +262,45 @@ class ClaimsStore:
             self._conn.close()
 
 
-def load_active(path: Path | str, t: datetime) -> list[Booking]:
-    """Bookings active at t, read with mode=ro. Fail-open: a missing, corrupt or locked
-    file means no bookings, and the error is printed by exception class only."""
+def _read_ro(path: Path | str, sql: str, params: tuple) -> list[Booking]:
+    """Run a SELECT of _COLUMNS rows with mode=ro. Fail-open: a missing, corrupt, locked or
+    malformed file means no bookings, and the error is printed by exception class only."""
     try:
         path = Path(path)
         if not path.exists():
             return []
-        ts = _utc(t).isoformat()
         # as_uri() percent-encodes '?', '#' and '%', so they cannot leak into the query string.
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
         try:
-            rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM claims WHERE cancelled_at IS NULL "
-                "AND start <= ? AND end > ? ORDER BY gpu, start, id", (ts, ts)).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         finally:
             conn.close()
         return [_row(r) for r in rows]
-    except (sqlite3.Error, OSError, ValueError) as e:
+    except Exception as e:
         print(f"claims unavailable: {type(e).__name__}")
         return []
+
+
+def load_active(path: Path | str, t: datetime) -> list[Booking]:
+    """Bookings active at t, read with mode=ro (fail-open, see _read_ro)."""
+    try:
+        ts = _utc(t).isoformat()
+    except Exception as e:
+        print(f"claims unavailable: {type(e).__name__}")
+        return []
+    return _read_ro(path, f"SELECT {_COLUMNS} FROM claims WHERE cancelled_at IS NULL "
+                    "AND start <= ? AND end > ? ORDER BY gpu, start, id", (ts, ts))
+
+
+def list_window_ro(path: Path | str, now: datetime, days_ahead: int = 14,
+                   days_back: int = 7) -> list[Booking]:
+    """Like ClaimsStore.list_window, but read with mode=ro and fail-open."""
+    try:
+        now = _utc(now)
+        lo = (now - timedelta(days=days_back)).isoformat()
+        hi = (now + timedelta(days=days_ahead)).isoformat()
+    except Exception as e:
+        print(f"claims unavailable: {type(e).__name__}")
+        return []
+    return _read_ro(path, f"SELECT {_COLUMNS} FROM claims WHERE end >= ? AND start <= ? "
+                    "ORDER BY start, id", (lo, hi))

@@ -13,8 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from resourcemonitor.claims import (DEFAULT_CLAIMS, PwdUsers, UserDirectory, list_window_ro,
+                                    load_active)
 from resourcemonitor.paths import DEFAULT_HISTORY, DEFAULT_POLICY
-from resourcemonitor.policy import load_policy
 from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timeseries, usage
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -109,6 +110,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             handler = {"/api/now": self._now, "/api/usage": self._usage,
                        "/api/timeseries": self._timeseries, "/api/timeline": self._timeline,
+                       "/api/claims": self._claims, "/api/users": self._users,
                        "/healthz": self._healthz}.get(path)
             if handler is None:
                 self._json(404, {"error": "not found"})
@@ -138,18 +140,13 @@ class _Handler(BaseHTTPRequestHandler):
     def _conn(self) -> sqlite3.Connection:
         return open_ro(self.server.history_path)
 
-    def _assignments(self) -> dict[str, frozenset[int]]:
-        try:
-            return load_policy(self.server.policy_path).assignments
-        except Exception:        # unreadable or invalid policy: show GPUs unassigned
-            return {}
-
     def _now(self, query: str) -> None:
         _params(query, set())
-        assignments = self._assignments()
+        now = self.server.clock()
+        bookings = load_active(self.server.claims_path, now)
         conn = self._conn()
         try:
-            data = latest(conn, assignments, self.server.clock(), self.server.stale_after_s)
+            data = latest(conn, bookings, now, self.server.stale_after_s)
         finally:
             conn.close()
         self._json(200, data)
@@ -158,10 +155,25 @@ class _Handler(BaseHTTPRequestHandler):
         _params(query, set())
         conn = self._conn()
         try:
-            data = latest(conn, {}, self.server.clock(), self.server.stale_after_s)
+            data = latest(conn, [], self.server.clock(), self.server.stale_after_s)
         finally:
             conn.close()
         self._json(200, {"ok": True, "age_s": data["age_s"]})
+
+    def _claims(self, query: str) -> None:
+        p = _params(query, {"days"})
+        days = 14
+        if "days" in p:
+            if not (p["days"].isascii() and p["days"].isdigit()) or not 1 <= int(p["days"]) <= 14:
+                raise BadRequest("days")
+            days = int(p["days"])
+        now = self.server.clock()
+        claims = list_window_ro(self.server.claims_path, now, days_ahead=days, days_back=7)
+        self._json(200, {"now": now.isoformat(), "claims": [b.to_json() for b in claims]})
+
+    def _users(self, query: str) -> None:
+        _params(query, set())
+        self._json(200, {"users": self.server.users.all()})
 
     def _usage(self, query: str) -> None:
         p = _params(query, {"from", "to", "by"})
@@ -206,16 +218,22 @@ class _Server(ThreadingHTTPServer):
     policy_path: Path
     stale_after_s: int
     clock: object
+    claims_path: Path
+    users: UserDirectory
 
 
 def make_server(bind: str, port: int, history_path: Path, policy_path: Path,
                 stale_after_s: int = 180,
-                clock=lambda: datetime.now(timezone.utc)) -> ThreadingHTTPServer:
+                clock=lambda: datetime.now(timezone.utc),
+                claims_path: Path = DEFAULT_CLAIMS,
+                users: UserDirectory | None = None) -> ThreadingHTTPServer:
     srv = _Server((bind, port), _Handler)
     srv.history_path = Path(history_path)
     srv.policy_path = Path(policy_path)
     srv.stale_after_s = stale_after_s
     srv.clock = clock
+    srv.claims_path = Path(claims_path)
+    srv.users = users if users is not None else PwdUsers()
     return srv
 
 
@@ -227,6 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history", type=Path, default=DEFAULT_HISTORY,
                    help="SQLite history file written by `watch` (opened read-only)")
     p.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
+    p.add_argument("--claims", type=Path, default=DEFAULT_CLAIMS,
+                   help="SQLite bookings file (opened read-only for GETs)")
     p.add_argument("--stale-after", type=int, default=180,
                    help="seconds without a poll before the page shows 'stale'")
     return p
@@ -235,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     srv = make_server(args.bind, args.port, args.history, args.policy,
-                      stale_after_s=args.stale_after)
+                      stale_after_s=args.stale_after, claims_path=args.claims)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

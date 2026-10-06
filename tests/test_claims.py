@@ -4,7 +4,8 @@ from datetime import timedelta
 
 import pytest
 
-from resourcemonitor.claims import (ClaimError, ClaimsStore, load_active, parse_time)
+from resourcemonitor.claims import (ClaimError, ClaimsStore, list_window_ro, load_active,
+                                     parse_time)
 from tests.claims_fixture import FakeUsers, T0, book
 
 
@@ -187,3 +188,28 @@ def test_load_active_fails_open_on_a_malformed_row(store, tmp_path, capsys):
     conn.close()
     assert load_active(tmp_path / "c.sqlite", T0 + timedelta(hours=1)) == []
     assert "claims unavailable: ValueError" in capsys.readouterr().out
+
+
+def test_list_window_ro_matches_the_store_and_is_fail_open(store, tmp_path, capsys):
+    a = book(store)
+    c = book(store, gpu=5, start=T0 + timedelta(days=3))
+    store.cancel(c.id, ip="10.0.0.1", now=T0)
+    far = book(store, gpu=6, start=T0 + timedelta(days=10))
+    path = tmp_path / "c.sqlite"
+    assert [b.id for b in list_window_ro(path, T0, days_ahead=14, days_back=7)] == \
+        [b.id for b in store.list_window(T0, days_ahead=14, days_back=7)]
+    assert [b.id for b in list_window_ro(path, T0, days_ahead=1, days_back=7)] == [a.id]
+    assert far.id in [b.id for b in list_window_ro(path, T0, 14, 7)]
+    assert list_window_ro(tmp_path / "missing.sqlite", T0, 14, 7) == []
+    assert capsys.readouterr().out == ""
+
+
+def test_readers_fail_open_on_any_exception_class(store, tmp_path, capsys, monkeypatch):
+    book(store)
+    path = tmp_path / "c.sqlite"
+    def boom(r):
+        raise KeyError("x")
+    monkeypatch.setattr("resourcemonitor.claims._row", boom)
+    assert load_active(path, T0 + timedelta(hours=1)) == []
+    assert list_window_ro(path, T0, 14, 7) == []
+    assert capsys.readouterr().out.count("claims unavailable: KeyError") == 2
