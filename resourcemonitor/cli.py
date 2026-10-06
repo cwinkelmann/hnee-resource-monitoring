@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from resourcemonitor.energy import EnergyLedger, format_report
+from resourcemonitor.model import Snapshot
 from resourcemonitor.notify import Notifier
 from resourcemonitor.policy import load_policy
 from resourcemonitor.probe import probe

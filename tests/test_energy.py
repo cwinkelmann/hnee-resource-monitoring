@@ -126,3 +126,46 @@ def test_report_shows_unattributed_and_per_gpu_total():
     assert "unattributed" in txt.lower()
     assert "1.5 kWh" in txt
     assert "3.0 kWh" in txt          # per-GPU total
+
+
+from resourcemonitor.energy import EnergyRow, IDLE_BUCKET, UNATTRIBUTED_BUCKET
+
+
+def test_accumulate_returns_none_and_no_rows_without_an_interval():
+    led = EnergyLedger()
+    assert led.accumulate(_snap(T0, [GpuState(0, 81559, 0, 0, 70.0)])) == (None, [])
+
+
+def test_accumulate_returns_one_row_per_gpu_and_bucket():
+    led = EnergyLedger(max_gap_s=7200)
+    g = [GpuState(6, 81559, 30000, 100, 600.0), GpuState(0, 81559, 0, 0, 66.0)]
+    p = [GpuProcess(1, 6, 10000, "a"), GpuProcess(2, 6, 10000, "a"),
+         GpuProcess(3, 6, 10000, None)]
+    led.accumulate(_snap(T0, g, p))
+
+    dt, rows = led.accumulate(_snap(T0 + timedelta(hours=1), g, p))
+
+    assert dt == 3600.0
+    by = {(r.gpu, r.bucket): r for r in rows}
+    assert set(by) == {(6, "a"), (6, UNATTRIBUTED_BUCKET), (0, IDLE_BUCKET)}
+    assert round(by[(6, "a")].kwh, 3) == 0.400            # two procs merged: 2/3 of 0.6
+    assert round(by[(6, UNATTRIBUTED_BUCKET)].kwh, 3) == 0.200
+    assert round(by[(0, IDLE_BUCKET)].kwh, 3) == 0.066
+    assert all(r.seconds == 3600.0 for r in rows)
+
+
+def test_rows_sum_to_the_same_energy_the_ledger_books():
+    led = EnergyLedger(max_gap_s=7200)
+    g = [GpuState(6, 81559, 30000, 100, 600.0)]
+    p = [GpuProcess(1, 6, 20000, "a"), GpuProcess(2, 6, 10000, "b")]
+    led.accumulate(_snap(T0, g, p))
+    _, rows = led.accumulate(_snap(T0 + timedelta(hours=1), g, p))
+
+    assert round(sum(r.kwh for r in rows), 6) == round(led.totals()["per_gpu"][6], 6)
+
+
+def test_a_gap_returns_no_rows():
+    led = EnergyLedger(max_gap_s=300)
+    g = [GpuState(0, 81559, 0, 100, 700.0)]
+    led.accumulate(_snap(T0, g))
+    assert led.accumulate(_snap(T0 + timedelta(hours=6), g)) == (None, [])
