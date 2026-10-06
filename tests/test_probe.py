@@ -97,3 +97,99 @@ def test_uid_is_parsed_from_the_status_uid_line():
     assert _parse_status_uid(status) == 1053
     assert _parse_status_uid("Name:\tx\n") is None
     assert _parse_status_uid("Uid:\tabc\n") is None
+
+
+from resourcemonitor.probe import label_for
+
+
+def test_apps_query_reads_the_process_name_column():
+    procs = parse_apps_query("GPU-ggg, 3578603, 77014 MiB, VLLM::Worker_TP0\n", {"GPU-ggg": 0})
+    assert procs[0].name == "VLLM::Worker_TP0" and procs[0].used_mib == 77014
+
+
+def test_apps_query_still_accepts_the_three_column_format():
+    procs = parse_apps_query("GPU-ggg, 3078913, 22706 MiB\n", {"GPU-ggg": 6})
+    assert procs[0].name is None and procs[0].pid == 3078913
+
+
+def test_a_comma_in_the_process_path_does_not_break_parsing():
+    procs = parse_apps_query("GPU-ggg, 7, 10 MiB, /opt/a,b/python\n", {"GPU-ggg": 1})
+    assert procs[0].name == "/opt/a,b/python"
+
+
+def test_label_shows_the_python_script_but_no_arguments():
+    cmd = ["/opt/kev/.venv/bin/python", "/app/scripts/kev_run.py", "_train_epochs",
+           "--token", "SECRET123", "--batch", "8"]
+    assert label_for("/opt/kev/.venv/bin/python", cmd) == "python kev_run.py"
+
+
+def test_label_shows_python_module():
+    assert label_for("python", ["python3.12", "-m", "vllm.entrypoints.openai.api_server",
+                                "--api-key", "SECRET"]) == "python -m vllm.entrypoints.openai.api_server"
+
+
+def test_label_falls_back_to_the_nvidia_process_name():
+    assert label_for("VLLM::Worker_TP0", ["VLLM::Worker_TP0"]) == "VLLM::Worker_TP0"
+    assert label_for("/usr/bin/blender", None) == "blender"
+    assert label_for(None, None) is None
+
+
+def test_label_is_capped_at_60_chars():
+    assert len(label_for("x" * 200, None)) == 60
+
+
+def _py(*args):
+    return label_for("python", ["python", *args])
+
+
+def test_dash_m_after_the_script_is_a_script_argument_not_a_module():
+    assert _py("train.py", "-m", "SECRET") == "python train.py"
+
+
+def test_dash_m_without_a_module_or_with_an_option_as_module_is_plain_python():
+    assert _py("-m") == "python"
+    label = _py("-m", "--token", "SECRET")
+    assert label == "python" and "SECRET" not in label
+
+
+def test_module_must_look_like_a_dotted_identifier():
+    assert _py("-m", "a/b;rm") == "python"
+    assert _py("-m", "pkg.mod") == "python -m pkg.mod"
+
+
+def test_dash_c_code_is_never_shown():
+    assert _py("-c", "x='a.py'") == "python"
+    assert _py("-u", "-c", "token='abc.py'") == "python"
+
+
+def test_a_py_looking_option_value_is_not_the_script():
+    label = _py("--token", "abc.py", "run.py")
+    assert "abc" not in label
+    assert _py("-X", "dev", "run.py") == "python run.py"
+    assert _py("-W", "ignore", "-u", "run.py") == "python run.py"
+
+
+def test_script_name_must_be_a_plain_py_basename():
+    assert _py("/a/b/we ird;.py") == "python"
+    assert _py("notes.txt", "x.py") == "python"
+
+
+def test_empty_and_nul_only_cmdlines():
+    assert label_for(None, []) is None
+    assert label_for(None, [""]) is None
+    assert label_for("python", []) == "python"
+
+
+def test_rewritten_argv0_does_not_leak_arguments():
+    assert "token" not in (label_for("gunicorn: worker [--token x]", None) or "")
+    assert "token" not in (label_for(None, ["gunicorn: worker [--token x]"]) or "")
+    assert label_for("bad;name", None) is None
+
+
+def test_cmdline_of_nul_only_is_none(monkeypatch, tmp_path):
+    import builtins, io
+    from resourcemonitor import probe as pr
+    real = builtins.open
+    monkeypatch.setattr(builtins, "open",
+                        lambda p, *a, **k: io.BytesIO(b"\0\0") if str(p).startswith("/proc/") else real(p, *a, **k))
+    assert pr.cmdline_of(1) is None

@@ -17,7 +17,7 @@ Energy is also tracked (see Energy below). Unknown owners are reported as unknow
 
 | fact | consequence |
 |---|---|
-| Python 3.12.3 at `/usr/bin/python3`, conda not on a non-interactive `PATH` | stdlib only; unit hardcodes `/usr/bin/python3` |
+| Services run in the `resourcemonitor` conda env (user's choice) | stdlib only; units hardcode `%h/miniconda3/envs/resourcemonitor/bin/python`. If the env is removed or renamed the monitor stops: `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest` |
 | `systemd --user` works, `Linger=yes` | runs as a user service, no root |
 | Docker is rootless; `dorian.zwanzig` is UID 1053, outside `cwinkelmann`'s subuid range | **cannot run in a rootless container**: inside, `/proc/<pid>` shows `uid=65534 nobody` for other users, so attribution is destroyed |
 | `nvidia-smi` reports PIDs only | owner comes from `/proc` |
@@ -29,9 +29,9 @@ Reach the box with `cwinkelmann@10.188.1.1` (the hostname `carrot` does not reso
 ## Running
 
 ```
-python3 -m resourcemonitor once              # one pass, prints the payload (dry)
-python3 -m resourcemonitor watch --interval 60
-python3 -m resourcemonitor report            # energy report from the ledger; no polling
+~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor once              # one pass, prints the payload (dry)
+~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor watch --interval 60
+~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor report            # energy report from the ledger; no polling
 ```
 
 Dry-run is the default. Nothing reaches Slack unless `--post` is given, and `--post`
@@ -64,3 +64,23 @@ estimate** when several users share a card (exact with a single process), not a 
 ## Tests
 
 `python3 -m pytest`
+
+## Dashboard
+
+`python -m resourcemonitor serve` serves a read-only "who does what when" page at
+**http://10.188.1.1:8765** (unit: `deploy/resourcemonitor-web.service`).
+
+- **Now** — live per-GPU state, refreshed every 30 s.
+- **Timeline** — which user ran what on which GPU over time.
+- **Energy usage** — kWh per user and per day (UTC days), with idle and unattributed shown separately.
+- **Last 24 h** — power and utilisation per GPU.
+
+It is **unauthenticated and visible to the whole LAN by choice**, and strictly **read-only**:
+the web process opens the history database with `mode=ro` and never imports probe or notify.
+
+History lives in `~/.local/state/resourcemonitor/history.sqlite`, written by `watch` on every
+poll (default on) and pruned to 90 days (`--retention-days`).
+
+Energy caveats apply to every kWh figure: measured only while the monitor was running, and
+per-user kWh splits a card's draw by memory share when several processes share it, so it is an
+estimate, not a measurement.

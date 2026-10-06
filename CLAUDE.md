@@ -9,9 +9,7 @@ to users and posts to Slack.
 Key-based auth, no password. 8 × H100 80GB HBM3, shared with `dorian.zwanzig` (UID 1053);
 the split is dorian 0–3, cwinkelmann 4–7.
 
-Run it with `/usr/bin/python3` (3.12.3). conda is deliberately not used and is not on
-`PATH` over non-interactive ssh — the tool is stdlib-only so it keeps working when envs
-come and go.
+The service runs in the `resourcemonitor` conda env (`~/miniconda3/envs/resourcemonitor`, Python 3.12) by the user's choice. The code stays stdlib-only, but **if that env is removed or renamed, the monitor stops**; recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`.
 
 ## Non-negotiables
 
@@ -20,8 +18,8 @@ come and go.
 - **It runs on the host, outside Docker.** A rootless container rewrites every foreign
   UID to 65534, so attribution silently becomes `nobody`. Verified 2026-10-06; see the
   plan's Measured facts. Do not "containerise it for consistency".
-- **Stdlib only.** No requests, no pynvml, no venv — it must survive a shared box with
-  no maintenance.
+- **Stdlib only** — no third-party packages (no requests, no pynvml). It runs in the
+  `resourcemonitor` conda env by the user's choice, but needs nothing installed into it.
 - **Dry-run is the default.** `--post` is opt-in.
 - **The Slack webhook is a bearer credential.** It lives in `~/.config/resourcemonitor/env`
   at mode 0600, is read from the environment, and never appears in a log, a repr or a
@@ -31,6 +29,8 @@ come and go.
 
 `probe.py` is the only module that shells out. Everything else is a pure function of a
 `Snapshot`, which is why the rules are testable on a laptop with no GPU. Keep that seam.
+
+`history.py` writes the SQLite history and `web.py` reads it with `mode=ro`; `web.py` must never import probe or notify.
 
 ## Energy numbers are estimates
 

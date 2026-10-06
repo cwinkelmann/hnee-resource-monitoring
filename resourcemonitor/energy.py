@@ -14,6 +14,20 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from resourcemonitor.model import Snapshot
+
+
+IDLE_BUCKET = "(idle)"
+UNATTRIBUTED_BUCKET = "(unattributed)"
+
+
+@dataclass(frozen=True)
+class EnergyRow:
+    gpu: int
+    bucket: str           # username, IDLE_BUCKET or UNATTRIBUTED_BUCKET
+    kwh: float
+    seconds: float        # interval length this GPU was held by this bucket
+
 
 @dataclass
 class EnergyLedger:
@@ -23,20 +37,21 @@ class EnergyLedger:
     idle_kwh: float = 0.0
     unattributed_kwh: float = 0.0
     since: str | None = None
-    _last: Snapshot | None = field(default=None, repr=False)  # type: ignore[name-defined]
+    _last: Snapshot | None = field(default=None, repr=False)
 
-    def accumulate(self, snap) -> None:
+    def accumulate(self, snap: Snapshot) -> tuple[float | None, list[EnergyRow]]:
         prev, self._last = self._last, snap
         if self.since is None:
             self.since = snap.taken_at.isoformat()
         if prev is None:
-            return                                  # no interval yet
+            return None, []                         # no interval yet
         dt_s = (snap.taken_at - prev.taken_at).total_seconds()
         if dt_s <= 0 or dt_s > self.max_gap_s:
-            return                                  # restart or clock jump: do not invent
+            return None, []                         # restart or clock jump: do not invent
 
         hours = dt_s / 3600.0
         procs_by_gpu: dict[int, list] = {}
+        acc: dict[tuple[int, str], float] = {}
         for p in prev.procs:
             procs_by_gpu.setdefault(p.gpu_index, []).append(p)
 
@@ -46,14 +61,19 @@ class EnergyLedger:
             holders = procs_by_gpu.get(g.index, [])
             if not holders:
                 self.idle_kwh += kwh
+                acc[(g.index, IDLE_BUCKET)] = kwh
                 continue
             total_mib = sum(max(p.used_mib, 1) for p in holders)
             for p in holders:
                 share = max(p.used_mib, 1) / total_mib
                 if p.user is None:                  # unattributed: do not bill a guess,
                     self.unattributed_kwh += kwh * share   # but do not lose it either
+                    acc[(g.index, UNATTRIBUTED_BUCKET)] = acc.get((g.index, UNATTRIBUTED_BUCKET), 0.0) + kwh * share
                     continue
                 self.per_user_kwh[p.user] = self.per_user_kwh.get(p.user, 0.0) + kwh * share
+                acc[(g.index, p.user)] = acc.get((g.index, p.user), 0.0) + kwh * share
+
+        return dt_s, [EnergyRow(gpu, bucket, kwh, dt_s) for (gpu, bucket), kwh in acc.items()]
 
     def totals(self) -> dict:
         return {"per_gpu": dict(self.per_gpu_kwh), "per_user": dict(self.per_user_kwh),

@@ -1,0 +1,17 @@
+# deploy/resourcemonitor-web.service  ->  ~/.config/systemd/user/
+[Unit]
+Description=GPU resource monitor dashboard (read-only, LAN, no auth)
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor serve --bind 10.188.1.1 --port 8765
+WorkingDirectory=%h/ResourceMonitor
+Restart=always
+RestartSec=10
+# Same reasoning as resourcemonitor.service: no ProtectSystem/ProtectHome/PrivateTmp
+# in a user unit (they imply PrivateUsers=yes). The process only reads history (mode=ro).
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

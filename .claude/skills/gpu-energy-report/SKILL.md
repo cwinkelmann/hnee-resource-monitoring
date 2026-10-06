@@ -6,10 +6,12 @@ description: Use when asked how much electricity or GPU time the shared box or a
 # GPU energy and occupancy reports
 
 ```bash
-ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && python3 -m resourcemonitor report'
+ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && ~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor report'
 ```
 
 Add `--post` to send it to Slack instead of printing it.
+
+The dashboard's Usage section (http://10.188.1.1:8765) shows the same numbers, with history.
 
 ## Two caveats that must travel with every number
 

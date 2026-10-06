@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>carrot GPUs</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>carrot GPUs</h1>
+  <div class="status">
+    <span id="last-poll" class="muted">loading…</span>
+    <span id="refresh-indicator" class="refresh" title="auto-refresh: live every 30 s">auto-refresh</span>
+    <span id="net-error" class="net-error" hidden>couldn't reach server (retrying)</span>
+  </div>
+</header>
+<div id="stale-banner" class="stale-banner" role="alert" hidden></div>
+<div id="empty" class="empty" hidden>No data yet — is the monitor running?</div>
+
+<main id="app">
+  <section id="now" class="panel">
+    <div class="panel-head"><h2>Now</h2><span class="hint">live, every 30 s</span></div>
+    <div id="gpu-grid" class="gpu-grid"></div>
+    <p id="slack-note" class="slack-note" hidden>Slack posting is off (dry run) — alerts are shown here only.</p>
+    <ul id="alerts" class="alerts"></ul>
+  </section>
+
+  <section id="timeline" class="panel">
+    <div class="panel-head">
+      <h2>Timeline — who does what when</h2>
+      <div class="controls" id="timeline-range">
+        <button type="button" data-hours="24" class="active">24 h</button>
+        <button type="button" data-hours="168">7 d</button>
+        <button type="button" data-hours="720">30 d</button>
+      </div>
+    </div>
+    <div id="timeline-chart" class="chart-wrap"></div>
+    <div id="timeline-legend" class="legend"></div>
+  </section>
+
+  <section id="usage" class="panel">
+    <div class="panel-head">
+      <h2>Energy usage <span class="hint">(UTC days)</span></h2>
+      <div class="controls-row">
+        <div class="controls" id="usage-range">
+          <button type="button" data-days="7" class="active">7 d</button>
+          <button type="button" data-days="30">30 d</button>
+          <button type="button" data-days="90">90 d</button>
+        </div>
+        <div class="controls" id="usage-by">
+          <button type="button" data-by="day" class="active">by day</button>
+          <button type="button" data-by="week">by week</button>
+        </div>
+      </div>
+    </div>
+    <div id="usage-chart" class="chart-wrap"></div>
+    <div id="usage-legend" class="legend"></div>
+    <p id="coverage" class="coverage"></p>
+    <div class="table-wrap">
+      <table id="usage-table" class="usage-table">
+        <thead><tr><th>who</th><th class="num">kWh</th><th class="num">~€ at 0.30/kWh</th><th class="num">GPU-hours</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <ul id="caveats" class="caveats"></ul>
+  </section>
+
+  <section id="timeseries" class="panel">
+    <div class="panel-head"><h2>Last 24 h</h2><span class="hint">power (line, 0–700 W) · utilisation (shaded)</span></div>
+    <div id="spark-grid" class="spark-grid"></div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

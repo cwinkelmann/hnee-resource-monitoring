@@ -1,0 +1,77 @@
+import re
+from pathlib import Path
+
+WEB = Path("resourcemonitor/web")
+
+
+def test_no_inline_script_or_style_because_csp_forbids_it():
+    html = (WEB / "index.html").read_text()
+    assert re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html) is None
+    assert "<style" not in html and " style=" not in html
+    assert 'src="/app.js"' in html and 'href="/app.css"' in html
+
+
+def test_no_external_urls_anywhere():
+    for f in ("index.html", "app.js", "app.css"):
+        assert re.search(r"https?://", (WEB / f).read_text()) is None, f
+
+
+def test_data_never_goes_through_innerHTML():
+    js = (WEB / "app.js").read_text()
+    assert "innerHTML" not in js and "outerHTML" not in js and "insertAdjacentHTML" not in js
+
+
+def test_page_has_the_three_sections_and_caveat_slot():
+    html = (WEB / "index.html").read_text()
+    for id_ in ("now", "timeline", "usage", "timeseries", "caveats", "stale-banner"):
+        assert f'id="{id_}"' in html
+
+
+def test_dry_run_slack_line_is_on_the_page_and_per_alert_status_only_when_posting():
+    html = (WEB / "index.html").read_text()
+    assert "Slack posting is off (dry run) — alerts are shown here only." in html
+    js = (WEB / "app.js").read_text()
+    assert 'd.slack !== "dry-run"' in js and 'd.slack === "posting"' in js
+
+
+def test_favicon_is_linked_and_self_contained():
+    html = (WEB / "index.html").read_text()
+    assert '<link rel="icon" href="/favicon.svg"' in html
+    svg = (WEB / "favicon.svg").read_text()
+    # the SVG namespace is a name, never fetched; nothing else may point outside
+    rest = svg.replace('xmlns="http://www.w3.org/2000/svg"', "", 1)
+    assert re.search(r"https?://|href=|<image|<script|@import", rest) is None
+
+
+def _run_js_function(name, call):
+    """Extract a top-level helper from app.js and evaluate `call` with node (skip without)."""
+    import json, shutil, subprocess
+    import pytest
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = (WEB / "app.js").read_text()
+    m = re.search(r"^  function " + name + r"\(.*?^  \}$", js, re.S | re.M)
+    assert m, f"{name} not found in app.js"
+    out = subprocess.run([node, "-e", m.group(0) + "\nconsole.log(JSON.stringify(" + call + "));"],
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_pack_lanes_puts_concurrent_jobs_on_separate_lanes():
+    # GPU 7 on the live box: a job and its helper over the same span, then a later job
+    r = _run_js_function("packLanes", "packLanes([{start: 0, end: 10}, {start: 0, end: 10},"
+                                      " {start: 10, end: 20}, {start: 5, end: 7}])")
+    assert r == {"lane": [0, 1, 0, 2], "count": 3}
+
+
+def test_pack_lanes_keeps_sequential_jobs_on_one_lane_and_never_returns_zero_lanes():
+    assert _run_js_function("packLanes", "packLanes([{start: 0, end: 5}, {start: 6, end: 9}])") \
+        == {"lane": [0, 0], "count": 1}
+    assert _run_js_function("packLanes", "packLanes([])") == {"lane": [], "count": 1}
+
+
+def test_timeline_ends_ongoing_bars_at_the_last_poll_when_stale():
+    js = (WEB / "app.js").read_text()
+    assert "state.now.stale" in js and "liveEnd" in js

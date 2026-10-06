@@ -12,7 +12,7 @@ description: Use when installing, updating or restarting the GPU ResourceMonitor
 | address | **`cwinkelmann@10.188.1.1`** |
 | hostname | **`carrot` does not resolve in DNS** (`SERVFAIL`) — use the IP, always |
 | auth | key-based; `ssh -o BatchMode=yes` works with no prompt |
-| python | `/usr/bin/python3` (3.12.3). **conda is not on `PATH`** over non-interactive ssh — which is what we want, since the tool is stdlib-only. |
+| python | `~/miniconda3/envs/resourcemonitor/bin/python` (3.12). Units run in that conda env by the user's choice; code stays stdlib-only. **If the env is removed or renamed, the monitor stops** — recreate with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`. |
 | hardware | 8 × H100 80GB HBM3, driver 580.178.04, shared with `dorian.zwanzig` |
 
 Quick liveness check before anything else:
@@ -57,14 +57,23 @@ Asking root for a uid→name table does not help — the UID is destroyed before
 4. **Dry run first, and read the output.**
 
    ```bash
-   ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && python3 -m resourcemonitor once'
+   ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && ~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor once'
    ```
 
    It prints the Slack payload instead of sending it. Confirm the alerts are ones you
-   would have wanted to receive. Leave it dry for a day before step 5 — the cost of a
+   would have wanted to receive. Leave it dry for a day before step 6 — the cost of a
    noisy first week is that the channel gets muted and the tool becomes useless.
 
-5. **Enable the unit**
+5. **Dry soak (writes history, never posts)** — leave this running while you watch the output:
+
+   ```bash
+   ssh cwinkelmann@10.188.1.1 'systemd-run --user --unit=resourcemonitor-soak --working-directory=/home/cwinkelmann/ResourceMonitor -p Restart=always -p RestartSec=30 -E PYTHONUNBUFFERED=1 /home/cwinkelmann/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor watch --interval 60'
+   ```
+
+   No `--post`. The dashboard only gets new data while either this soak or the real unit
+   is running `watch`: history is written by `watch`, never by `serve`.
+
+6. **Enable the unit**
 
    Before enabling, stop any dry-run transient unit and remove its state to avoid cooldowns silencing real incidents:
 
@@ -80,10 +89,12 @@ Asking root for a uid→name table does not help — the UID is destroyed before
      systemctl --user enable --now resourcemonitor'
    ```
 
-6. **Verify**
+7. **Verify**
 
    ```bash
    ssh cwinkelmann@10.188.1.1 'systemctl --user status resourcemonitor --no-pager | head -20'
+   ssh cwinkelmann@10.188.1.1 'systemctl --user status resourcemonitor-web --no-pager | head -12'
+   ssh cwinkelmann@10.188.1.1 'curl -s http://10.188.1.1:8765/healthz'
    ```
 
 ## When alerts stop arriving
@@ -92,3 +103,17 @@ In this order: `systemctl --user status` (is it running?); `journalctl --user -u
 resourcemonitor -n 50` (is it erroring?); check the state file — an incident inside its
 cooldown is *supposed* to be silent; confirm `SLACK_WEBHOOK_URL` is still set, since an
 expired webhook returns a non-2xx that the tool logs but does not crash on.
+
+## Dashboard
+
+Read-only web page on the LAN (no auth, by choice), served by `resourcemonitor-web`:
+
+```bash
+ssh cwinkelmann@10.188.1.1 'cp ~/ResourceMonitor/deploy/resourcemonitor-web.service \
+  ~/.config/systemd/user/ && systemctl --user daemon-reload && \
+  systemctl --user enable --now resourcemonitor-web'
+ssh cwinkelmann@10.188.1.1 'curl -s http://10.188.1.1:8765/healthz'
+```
+
+Then open http://10.188.1.1:8765. Firewall caveat: if `healthz` works on carrot but the
+LAN cannot reach port 8765, ask carrot's admin to open it; do not change the firewall yourself.

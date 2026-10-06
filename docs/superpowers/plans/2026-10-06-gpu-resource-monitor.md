@@ -22,11 +22,7 @@ Everything in this plan runs on one machine. How to get to it, measured 2026-10-
 | hardware | 8 × NVIDIA H100 80GB HBM3, driver 580.178.04 |
 | shared with | `dorian.zwanzig` (UID 1053). Split agreed 2026-08-19: dorian 0–3, cwinkelmann 4–7. |
 
-**The interpreter.** A non-interactive `ssh` gets `/usr/bin/python3` = Python 3.12.3, and
-**conda is not on `PATH`** in that context. That is exactly what this tool wants — it is
-stdlib-only by design, so it must run on the system interpreter and never on a conda env
-that might be renamed or removed. The systemd unit therefore hardcodes `/usr/bin/python3`.
-Do not "fix" it to `python3`: an interactive login may resolve that to a conda python.
+**The interpreter.** The service runs in the `resourcemonitor` conda env (`~/miniconda3/envs/resourcemonitor`, Python 3.12) by the user's choice. The code stays stdlib-only, but **if that env is removed or renamed, the monitor stops**; recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`. (Originally this plan hardcoded `/usr/bin/python3`; superseded 2026-10-06.)
 
 `nvidia-smi` is at `/usr/bin/nvidia-smi` and needs no special environment.
 
