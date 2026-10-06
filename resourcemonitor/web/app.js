@@ -21,7 +21,32 @@ function freeVramMiB(claims, gpu, startMs, endMs, cardMiB) {
   }
   return Math.max(0, cardMiB - worst);
 }
-if (typeof module !== "undefined") module.exports = { freeVramMiB };
+
+// Per-key debounce: deliver(key, value) runs delayMs after the last push for that key, with
+// only the latest value; flush(key) delivers a pending value at once. schedule/cancel are
+// setTimeout/clearTimeout in the page and a fake clock in the tests.
+function makeDebouncer(delayMs, deliver, schedule, cancel) {
+  const pending = new Map();   // key -> { value, timer }
+  function fire(key) {
+    const p = pending.get(key);
+    if (!p) return;
+    pending.delete(key);
+    deliver(key, p.value);
+  }
+  return {
+    push(key, value) {
+      const p = pending.get(key);
+      if (p) cancel(p.timer);
+      pending.set(key, { value: value, timer: schedule(() => fire(key), delayMs) });
+    },
+    flush(key) {
+      const p = pending.get(key);
+      if (p) { cancel(p.timer); fire(key); }
+    },
+    pending(key) { return pending.has(key); },
+  };
+}
+if (typeof module !== "undefined") module.exports = { freeVramMiB, makeDebouncer };
 
 // Start-up only in a browser: Node loads this file for the tests above.
 if (typeof document !== "undefined") (function () {
@@ -41,6 +66,9 @@ if (typeof document !== "undefined") (function () {
   const CHANGES_SHOWN = 20;
   const USER_KEY = "rm.user";
   const HOLDER_ERROR_MS = 20000;              // how long a card shows a quick-booking error
+  // Arrow keys / type-ahead on a closed select fire change per keystroke (Windows, Linux):
+  // only the pick that stays this long is booked. Enter and leaving the dropdown send at once.
+  const HOLDER_DEBOUNCE_MS = 600;
 
   const state = {
     now: null, timeline: null, usage: null, timeseries: null,
@@ -467,13 +495,15 @@ if (typeof document !== "undefined") (function () {
   // ---------- quick booking: the holder dropdown on each card ----------
   // The GPU's quick booking (whole card until 09:00) and whether a calendar booking is active.
   function holderOf(g) {
+    const cal = g.bookings.filter((b) => b.kind !== "quick");
     return {
       quick: g.bookings.find((b) => b.kind === "quick") || null,
-      calendar: g.bookings.some((b) => b.kind !== "quick"),
+      calendar: cal.length > 0,
+      wholeCard: cal.length > 0 && cal.reduce((s, b) => s + b.vram_mib, 0) >= g.total_mib,
     };
   }
   function holderHint(h) {
-    if (h.calendar) return "partly booked — use the calendar";
+    if (h.calendar) return h.wholeCard ? "booked — use the calendar" : "partly booked — use the calendar";
     return h.quick ? "until " + fmtTime(new Date(h.quick.end)) : "";
   }
   function holderNode(g) {
@@ -497,7 +527,9 @@ if (typeof document !== "undefined") (function () {
         sel.appendChild(o);
       }
       sel.value = h.quick ? h.quick.user : "";
-      sel.addEventListener("change", () => setHolder(g.gpu, sel));
+      sel.addEventListener("change", () => holderDebounce.push(g.gpu, { sel: sel, value: sel.value }));
+      sel.addEventListener("keydown", (e) => { if (e.key === "Enter") holderDebounce.flush(g.gpu); });
+      sel.addEventListener("blur", () => holderDebounce.flush(g.gpu));
     }
     wrap.appendChild(sel);
     wrap.appendChild(el("span", "hint holder-hint", holderHint(h)));
@@ -523,7 +555,7 @@ if (typeof document !== "undefined") (function () {
   // Show the server's state in a dropdown that was kept because it had focus.
   function syncHolder(gpu, sel) {
     const g = nowGpu(gpu);
-    if (!g || !sel.isConnected) return;
+    if (!g || !sel.isConnected || holderDebounce.pending(gpu)) return;   // a newer pick waits
     const h = holderOf(g);
     if (h.calendar) { sel.blur(); renderNow(); return; }   // rebuilt as the disabled dropdown
     const want = h.quick ? h.quick.user : "";
@@ -531,9 +563,12 @@ if (typeof document !== "undefined") (function () {
     if (sel.value !== want) sel.value = want;
     sel.parentNode.querySelector(".holder-hint").textContent = holderHint(h);
   }
+  const holderDebounce = makeDebouncer(HOLDER_DEBOUNCE_MS,
+    (gpu, pick) => setHolder(gpu, pick.sel, pick.value),
+    (fn, ms) => setTimeout(fn, ms), (t) => clearTimeout(t));
   // One request per GPU at a time; picks made meanwhile are sent next, the latest one wins.
-  async function setHolder(gpu, sel) {
-    state.holderWant.set(gpu, sel.value);
+  async function setHolder(gpu, sel, value) {
+    state.holderWant.set(gpu, value);
     if (state.holderBusy.has(gpu)) return;
     state.holderBusy.add(gpu);
     let res, sent;
