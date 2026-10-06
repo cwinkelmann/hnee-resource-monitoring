@@ -497,7 +497,12 @@
     tr.appendChild(el("td", "", "total"));
     tr.appendChild(el("td", "num", fmtNum(kwhSum, 2)));
     tr.appendChild(el("td", "num", fmtNum(kwhSum * EUR_PER_KWH, 2)));
-    tr.appendChild(el("td", "num", fmtNum(hSum, 1)));
+    // Not hSum: a card shared by two people in one poll counts once in the total.
+    const cardHours = typeof d.gpu_hours_total === "number" ? d.gpu_hours_total : hSum;
+    const hCell = el("td", "num", fmtNum(cardHours, 1));
+    hCell.title = "GPU-hours of the cards: a GPU shared by several people at once counts once, "
+      + "so this can be less than the sum of the rows above";
+    tr.appendChild(hCell);
     tbody.appendChild(tr);
   }
 

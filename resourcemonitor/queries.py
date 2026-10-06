@@ -26,6 +26,12 @@ def open_ro(path: Path | str) -> sqlite3.Connection:
     return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
 
 
+def _require_polls(conn: sqlite3.Connection) -> None:
+    """A history file that exists but holds no poll yet is 'no history', not empty data."""
+    if conn.execute("SELECT 1 FROM polls LIMIT 1").fetchone() is None:
+        raise NoHistory("no polls")
+
+
 def latest(conn: sqlite3.Connection, assignments: dict[str, frozenset[int]],
            now: datetime, stale_after_s: int) -> dict:
     ts = conn.execute("SELECT MAX(ts) FROM polls").fetchone()[0]
@@ -68,6 +74,7 @@ def _monday(d: date) -> date:
 def usage(conn: sqlite3.Connection, start: date, end: date, by: str, now: datetime) -> dict:
     if by not in ("day", "week"):
         raise ValueError(f"by must be 'day' or 'week', not {by!r}")
+    _require_polls(conn)
     key = (lambda d: _monday(d)) if by == "week" else (lambda d: d)
     step = timedelta(days=7 if by == "week" else 1)
     periods: dict[date, dict] = {}
@@ -84,6 +91,11 @@ def usage(conn: sqlite3.Connection, start: date, end: date, by: str, now: dateti
         for field, value in (("kwh", kwh), ("gpu_hours", seconds / 3600)):
             period[field][bucket] = period[field].get(bucket, 0.0) + value
             totals[field][bucket] = totals[field].get(bucket, 0.0) + value
+    # A card shared by several buckets in one poll has a row per bucket, each with the full
+    # interval: the per-bucket hours are right, but their sum would count that card twice.
+    (card_s,) = conn.execute(
+        "SELECT COALESCE(SUM(s), 0) FROM (SELECT MAX(seconds) AS s FROM energy_samples "
+        "WHERE ts >= ? AND ts < ? GROUP BY ts, gpu)", (lo, hi)).fetchone()
     monitored_s, first = conn.execute(
         "SELECT COALESCE(SUM(dt_s), 0), MIN(ts) FROM polls WHERE ts >= ? AND ts < ?",
         (lo, hi)).fetchone()
@@ -100,12 +112,14 @@ def usage(conn: sqlite3.Connection, start: date, end: date, by: str, now: dateti
     ratio = monitored_s / elapsed_s if elapsed_s else 0.0
     return {"from": start.isoformat(), "to": end.isoformat(), "by": by,
             "periods": list(periods.values()), "totals": totals,
+            "gpu_hours_total": card_s / 3600,
             "coverage": {"monitored_s": float(monitored_s), "elapsed_s": elapsed_s, "ratio": ratio,
                          "since": since},
             "caveats": list(CAVEATS)}
 
 
 def timeseries(conn: sqlite3.Connection, hours: int, now: datetime, max_points: int = 300) -> dict:
+    _require_polls(conn)
     since = (now - timedelta(hours=hours)).isoformat()
     rows: dict[int, list[tuple]] = {}
     for ts, gpu, power, util in conn.execute(
@@ -180,6 +194,7 @@ def _extend_back(conn: sqlite3.Connection, gpu: int, job: dict, first_ts: str) -
 
 def timeline(conn: sqlite3.Connection, hours: int, now: datetime) -> dict:
     """Runs of consecutive polls per (gpu, pid), split at monitoring gaps (dt_s NULL)."""
+    _require_polls(conn)
     lo, hi = (now - timedelta(hours=hours)).isoformat(), now.isoformat()
     last_poll = conn.execute("SELECT MAX(ts) FROM polls").fetchone()[0]
     gpu_ids = {r[0] for r in conn.execute(

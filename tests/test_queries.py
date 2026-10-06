@@ -212,3 +212,41 @@ def test_timeline_lookback_stops_at_gap_and_takes_max_from_before_window(edge_db
     assert _runs(edge_db, 1, 64)["0"] == [(5, "00:03", "00:04", 100, False)]
     # window opens at 00:02: look-back reaches 00:01 (max 900) and stops at 00:00 gap poll
     assert _runs(edge_db, 1, 62)["0"][0] == (5, "00:00", "00:02", 900, False)
+
+
+def test_usage_total_gpu_hours_counts_a_shared_gpu_once(tmp_path):
+    """User + unattributed process on one card for 10 min: each bucket held it 10 min,
+    but the card was busy 10 min, not 20."""
+    from resourcemonitor.energy import EnergyLedger
+    from resourcemonitor.history import HistoryWriter
+    from resourcemonitor.model import GpuProcess, GpuState, Snapshot
+    p = tmp_path / "h.sqlite"
+    w, led = HistoryWriter(p), EnergyLedger(max_gap_s=600)
+    for m in range(11):
+        snap = Snapshot(T0 + timedelta(minutes=m), (GpuState(0, 81559, 6000, 90, 400.0),),
+                        (GpuProcess(1, 0, 4000, "a", "x"), GpuProcess(2, 0, 2000, None, None)))
+        dt, rows = led.accumulate(snap)
+        w.record(snap, dt, rows, [], set())
+    w.close()
+    u = usage(open_ro(p), date(2026, 10, 5), date(2026, 10, 5), "day", now=T0 + timedelta(hours=1))
+    assert u["totals"]["gpu_hours"] == pytest.approx({"a": 10 / 60, "(unattributed)": 10 / 60})
+    assert u["gpu_hours_total"] == pytest.approx(10 / 60)
+
+
+def test_usage_total_gpu_hours_on_the_fixture_is_all_cards(db):
+    u = usage(open_ro(db), date(2026, 10, 5), date(2026, 10, 5), "day",
+              now=T0 + timedelta(hours=48))
+    assert u["gpu_hours_total"] == pytest.approx(8 * (24 - 5 / 60), abs=1e-6)  # 8 cards; first poll has no interval
+
+
+@pytest.mark.parametrize("fn", ["usage", "timeline", "timeseries"])
+def test_queries_on_a_db_without_polls_are_no_history(tmp_path, fn):
+    from resourcemonitor.history import HistoryWriter
+    p = tmp_path / "h.sqlite"
+    HistoryWriter(p).close()
+    now = T0 + timedelta(hours=1)
+    call = {"usage": lambda c: usage(c, date(2026, 10, 5), date(2026, 10, 5), "day", now),
+            "timeline": lambda c: timeline(c, 24, now),
+            "timeseries": lambda c: timeseries(c, 24, now)}[fn]
+    with pytest.raises(NoHistory):
+        call(open_ro(p))

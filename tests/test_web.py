@@ -178,3 +178,15 @@ def test_favicon_svg_is_served_and_favicon_ico_is_204(live):
     for h in (headers,):
         assert h["Content-Security-Policy"] == "default-src 'self'"
         assert h["X-Content-Type-Options"] == "nosniff"
+
+
+@pytest.mark.parametrize("path", ["/api/usage", "/api/timeline", "/api/timeseries", "/api/now"])
+def test_existing_db_with_zero_polls_is_503_no_history(tmp_path, path):
+    from resourcemonitor.history import HistoryWriter
+    HistoryWriter(tmp_path / "h.sqlite").close()
+    srv, base = _serve(tmp_path, with_history=False)
+    try:
+        status, _, body = _get(base + path)
+        assert status == 503 and json.loads(body) == {"error": "no history yet"}
+    finally:
+        srv.shutdown()
