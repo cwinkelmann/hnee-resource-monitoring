@@ -82,3 +82,18 @@ def test_parses_a_real_recording_from_the_gpu_host():
     assert all(g.power_w > 0 for g in gpus)
     assert procs
     assert all(p.gpu_index in range(8) for p in procs)
+
+
+def test_na_memory_cell_does_not_lose_the_poll():
+    from resourcemonitor.probe import _num
+    assert _num("[N/A]") == 0
+    assert _num("[Not Supported]") == 0
+    assert _num("22715 MiB") == 22715
+
+
+def test_uid_is_parsed_from_the_status_uid_line():
+    from resourcemonitor.probe import _parse_status_uid
+    status = "Name:\tpython\nUmask:\t0022\nUid:\t1053\t1053\t1053\t1053\nGid:\t1\t1\t1\t1\n"
+    assert _parse_status_uid(status) == 1053
+    assert _parse_status_uid("Name:\tx\n") is None
+    assert _parse_status_uid("Uid:\tabc\n") is None

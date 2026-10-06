@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from resourcemonitor.state import State
@@ -45,5 +46,34 @@ def test_state_survives_a_restart(tmp_path):
 def test_a_corrupt_state_file_does_not_crash_the_daemon(tmp_path):
     p = tmp_path / "s.json"
     p.write_text("{not json")
+
+    assert State.load(p).should_send("k", T0, 3600) is True
+
+
+import pytest
+
+
+@pytest.mark.parametrize("content", ["[1, 2]", '"str"', "null", "42"])
+def test_non_dict_json_is_tolerated(tmp_path, content):
+    p = tmp_path / "s.json"
+    p.write_text(content)
+
+    assert State.load(p).should_send("k", T0, 3600) is True
+
+
+def test_undecodable_or_unreadable_state_is_tolerated(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_bytes(b"\xff\xfe\x00bad")
+    assert State.load(p).should_send("k", T0, 3600) is True
+
+    d = tmp_path / "dir.json"
+    d.mkdir()                       # reading a directory raises OSError
+    assert State.load(d).should_send("k", T0, 3600) is True
+
+
+@pytest.mark.parametrize("stored", ["garbage", "2026-10-06T12:00:00", 5])
+def test_unparsable_or_naive_stored_timestamp_counts_as_not_seen(tmp_path, stored):
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"k": stored}))
 
     assert State.load(p).should_send("k", T0, 3600) is True

@@ -14,7 +14,10 @@ APP_FIELDS = "gpu_uuid,pid,used_memory"
 
 def _num(cell: str) -> int:
     """'22715 MiB' -> 22715, '98 %' -> 98. nvidia-smi units break a bare int()."""
-    return int(cell.strip().split()[0])
+    try:
+        return int(cell.strip().split()[0])
+    except (ValueError, IndexError):
+        return 0            # '[N/A]' / '[Not Supported]': not a reason to lose the poll
 
 
 def _watts(cell: str) -> float:
@@ -73,10 +76,24 @@ def _run(fields: str, query: str) -> str:
 _OVERFLOW_UID = 65534
 
 
+def _parse_status_uid(text: str) -> int | None:
+    """Real UID from the 'Uid:' line of /proc/<pid>/status, or None if absent/garbled."""
+    for line in text.splitlines():
+        if line.startswith("Uid:"):
+            try:
+                return int(line.split()[1])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
 def _uid_of(pid: int) -> int | None:
+    # Not os.stat(/proc/<pid>): that dir is owned by root for non-dumpable processes,
+    # which would name "root" wrongly.
     try:
-        return os.stat(f"/proc/{pid}").st_uid
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        with open(f"/proc/{pid}/status") as f:
+            return _parse_status_uid(f.read())
+    except (FileNotFoundError, PermissionError, ProcessLookupError, UnicodeDecodeError):
         return None       # exited between the nvidia-smi call and this read
 
 
