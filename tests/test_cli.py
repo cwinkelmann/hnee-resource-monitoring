@@ -71,7 +71,7 @@ def test_run_once_gates_repeat_alerts_and_saves_energy(monkeypatch, tmp_path):
     gpu = next(iter(pol.assignments[owner]))
     other = next(u for u in pol.assignments if u != owner)
     snap = Snapshot(datetime.now(timezone.utc),
-                    (GpuState(gpu, 81559, 22715, 100, 500.0),),
+                    (GpuState(gpu, 81559, 81000, 100, 500.0),),
                     (GpuProcess(1, gpu, 22706, other),))
     monkeypatch.setattr(cli, "probe", lambda: snap)
 
@@ -115,7 +115,7 @@ def _history_setup(monkeypatch, tmp_path):
     gpu = next(iter(pol.assignments[owner]))
     other = next(u for u in pol.assignments if u != owner)
     snap = Snapshot(datetime.now(timezone.utc),
-                    (GpuState(gpu, 81559, 22715, 100, 500.0),),
+                    (GpuState(gpu, 81559, 81000, 100, 500.0),),
                     (GpuProcess(1, gpu, 22706, other),))
     ticks = iter(range(1, 1000))
 
@@ -245,3 +245,39 @@ def test_watch_survives_a_history_constructor_failure(tmp_path, monkeypatch, cap
     assert seen == [None]
     out = capsys.readouterr().out
     assert "history disabled: OperationalError" in out and "/secret/path" not in out
+
+
+def test_run_once_alerts_on_someone_elses_booking(tmp_path, monkeypatch):
+    import dataclasses
+    from datetime import datetime, timedelta, timezone
+    from resourcemonitor import cli
+    from resourcemonitor.claims import ClaimsStore
+    from resourcemonitor.model import GpuProcess, GpuState, Snapshot
+    from tests.claims_fixture import FakeUsers
+    pol, state, rec, tracker, ledger, epath = _history_setup(monkeypatch, tmp_path)
+    t0 = datetime.now(timezone.utc)
+    snap = Snapshot(t0, (GpuState(4, 81559, 70 * 1024, 100, 500.0),),
+                    (GpuProcess(1, 4, 70 * 1024, "andre.kliem"),))
+    monkeypatch.setattr(cli, "probe", lambda: dataclasses.replace(snap, taken_at=t0))
+    s = ClaimsStore(tmp_path / "c.sqlite", users=FakeUsers())
+    s.create(user="dorian.zwanzig", gpu=4, vram_mib=60 * 1024, start=t0 - timedelta(minutes=1),
+             end=t0 + timedelta(hours=4), note=None, ip="10.0.0.1", now=t0)
+    s.close()
+    cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath,
+                 claims_path=tmp_path / "c.sqlite")
+    assert any(a.kind == "booked_gpu" for batch in rec.sent for a in batch)
+
+
+def test_a_broken_claims_db_never_stops_the_other_rules(tmp_path, monkeypatch, capsys):
+    from resourcemonitor import cli
+    pol, state, rec, tracker, ledger, epath = _history_setup(monkeypatch, tmp_path)
+    (tmp_path / "c.sqlite").write_bytes(b"garbage" * 500)
+    # _history_setup's probe is a full box (81000 of 81559 MiB used): capacity fires
+    cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath,
+                 claims_path=tmp_path / "c.sqlite")
+    assert any(a.kind == "capacity" for batch in rec.sent for a in batch)
+    assert "claims unavailable: DatabaseError" in capsys.readouterr().out
+
+
+def test_claims_flag_parses():
+    assert str(build_parser().parse_args(["watch", "--claims", "/x/c.sqlite"]).claims) == "/x/c.sqlite"

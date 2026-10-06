@@ -31,6 +31,7 @@ The service runs in the `resourcemonitor` conda env (`~/miniconda3/envs/resource
 `Snapshot`, which is why the rules are testable on a laptop with no GPU. Keep that seam.
 
 `history.py` writes the SQLite history and `web.py` reads it with `mode=ro`; `web.py` must never import probe or notify.
+The web process writes only `claims.sqlite` (bookings); `history.sqlite` stays read-only to it.
 
 ## Energy numbers are estimates
 

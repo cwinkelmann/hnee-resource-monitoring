@@ -41,3 +41,10 @@ def test_deploy_skill_covers_the_dashboard():
     assert "resourcemonitor-web" in body and "8765" in body
     assert "systemd-run --user --unit=resourcemonitor-soak" in body
     assert "miniconda3/envs/resourcemonitor/bin/python" in body
+
+
+def test_docs_describe_booking_honestly():
+    readme = (ROOT / "README.md").read_text()
+    assert "Booking a GPU" in readme and "honour system" in readme and "never enforced" in readme
+    claude = (ROOT / "CLAUDE.md").read_text()
+    assert "claims.sqlite" in claude

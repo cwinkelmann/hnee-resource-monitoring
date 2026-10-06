@@ -7,6 +7,8 @@ from itertools import groupby
 from math import ceil
 from pathlib import Path
 
+from resourcemonitor.claims import Booking
+
 CAVEATS = [
     "Measured only while the monitor was running.",
     "Per-user kWh splits a card's draw by memory share when several processes share it "
@@ -32,13 +34,15 @@ def _require_polls(conn: sqlite3.Connection) -> None:
         raise NoHistory("no polls")
 
 
-def latest(conn: sqlite3.Connection, assignments: dict[str, frozenset[int]],
+def latest(conn: sqlite3.Connection, bookings: list[Booking],
            now: datetime, stale_after_s: int) -> dict:
     ts = conn.execute("SELECT MAX(ts) FROM polls").fetchone()[0]
     if ts is None:
         raise NoHistory("no polls")
     age_s = (now - datetime.fromisoformat(ts)).total_seconds()
-    owner = {g: user for user, gpus in assignments.items() for g in gpus}
+    booked: dict[int, list[Booking]] = {}
+    for b in sorted(bookings, key=lambda b: (b.start, b.id)):
+        booked.setdefault(b.gpu, []).append(b)
     procs: dict[int, list[dict]] = {}
     for gpu, pid, user, name, used in conn.execute(
             "SELECT gpu, pid, user, name, used_mib FROM proc_samples WHERE ts=? "
@@ -46,7 +50,9 @@ def latest(conn: sqlite3.Connection, assignments: dict[str, frozenset[int]],
         procs.setdefault(gpu, []).append(
             {"pid": pid, "user": user, "name": name, "used_mib": used})
     gpus = [{"gpu": g, "total_mib": total, "used_mib": used, "util_pct": util,
-             "power_w": power, "assigned_to": owner.get(g), "procs": procs.get(g, [])}
+             "power_w": power, "bookings": [b.to_json() for b in booked.get(g, [])],
+             "booked_mib": (bm := sum(b.vram_mib for b in booked.get(g, []))),
+             "free_mib": max(total - bm, 0), "procs": procs.get(g, [])}
             for g, total, used, util, power in conn.execute(
                 "SELECT gpu, total_mib, used_mib, util_pct, power_w FROM gpu_samples "
                 "WHERE ts=? ORDER BY gpu", (ts,))]

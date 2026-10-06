@@ -6,7 +6,6 @@ from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timese
 from tests.history_fixture import build_history
 
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
-ASSIGN = {"dorian.zwanzig": frozenset({0, 1, 2, 3}), "cwinkelmann": frozenset({4, 5, 6, 7})}
 
 
 @pytest.fixture(scope="module")
@@ -37,21 +36,37 @@ def test_reader_cannot_write(db):
 
 def test_latest_reports_gpus_owners_and_assignees(db):
     now = T0 + timedelta(hours=48)
-    d = latest(open_ro(db), ASSIGN, now, stale_after_s=600)
+    d = latest(open_ro(db), [], now, stale_after_s=600)
     assert d["stale"] is False and len(d["gpus"]) == 8
     g6 = d["gpus"][6]
-    assert g6["assigned_to"] == "cwinkelmann"
+    assert "assigned_to" not in g6 and g6["bookings"] == []
+    assert g6["booked_mib"] == 0 and g6["free_mib"] == g6["total_mib"]
     assert {p["user"] for p in g6["procs"]} == {"dorian.zwanzig"}
     assert d["gpus"][4]["procs"][0]["user"] is None          # unattributed stays null
     assert [a["key"] for a in d["alerts"]] == [               # one alert per incident
-        "allocation:dorian.zwanzig:6", "allocation:dorian.zwanzig:7", "unattributed:4"]
-    assert "GPU 7 (22.7 GiB)" in d["alerts"][1]["text"]      # job + helper, summed
+        "booking:other:dorian.zwanzig:6", "booking:other:dorian.zwanzig:7", "unattributed:4"]
+    assert "using 22.7 GiB on GPU 7" in d["alerts"][1]["text"]      # job + helper, summed
+
+
+def test_latest_reports_active_bookings_per_gpu(db):
+    from resourcemonitor.claims import Booking
+    now = T0 + timedelta(hours=48)
+    def bk(i, gpu, mib, start):
+        return Booking(id=i, user="cwinkelmann", gpu=gpu, vram_mib=mib, start=start,
+                       end=now + timedelta(hours=1), note=None, created_at=now, created_ip="x")
+    bookings = [bk(2, 6, 20480, now - timedelta(minutes=5)), bk(1, 6, 40960, now - timedelta(hours=1))]
+    d = latest(open_ro(db), bookings, now, 600)
+    g6 = d["gpus"][6]
+    assert [b["id"] for b in g6["bookings"]] == [1, 2] and g6["bookings"][0]["user"] == "cwinkelmann"
+    assert g6["booked_mib"] == 61440 and g6["free_mib"] == g6["total_mib"] - 61440
+    big = latest(open_ro(db), [bk(3, 5, 10**6, now)], now, 600)["gpus"][5]
+    assert big["free_mib"] == 0
 
 
 def test_latest_reports_the_slack_mode(tmp_path):
     p = tmp_path / "h.sqlite"
     build_history(p, T0, hours=1, slack_mode="dry-run")
-    assert latest(open_ro(p), ASSIGN, T0 + timedelta(hours=1), 600)["slack"] == "dry-run"
+    assert latest(open_ro(p), [], T0 + timedelta(hours=1), 600)["slack"] == "dry-run"
 
 
 def test_latest_slack_mode_is_null_for_an_old_db_without_meta(tmp_path):
@@ -59,15 +74,15 @@ def test_latest_slack_mode_is_null_for_an_old_db_without_meta(tmp_path):
     build_history(p, T0, hours=1)
     import sqlite3
     c = sqlite3.connect(p); c.execute("DROP TABLE meta"); c.commit(); c.close()
-    assert latest(open_ro(p), ASSIGN, T0 + timedelta(hours=1), 600)["slack"] is None
+    assert latest(open_ro(p), [], T0 + timedelta(hours=1), 600)["slack"] is None
 
 
 def test_latest_slack_mode_is_null_when_never_recorded(db):
-    assert latest(open_ro(db), ASSIGN, T0 + timedelta(hours=48), 600)["slack"] is None
+    assert latest(open_ro(db), [], T0 + timedelta(hours=48), 600)["slack"] is None
 
 
 def test_latest_is_stale_when_the_monitor_stopped(db):
-    d = latest(open_ro(db), ASSIGN, T0 + timedelta(days=3), stale_after_s=600)
+    d = latest(open_ro(db), [], T0 + timedelta(days=3), stale_after_s=600)
     assert d["stale"] is True and d["age_s"] > 600
 
 

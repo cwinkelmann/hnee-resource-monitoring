@@ -27,6 +27,50 @@
     <ul id="alerts" class="alerts"></ul>
   </section>
 
+  <section id="bookings" class="panel">
+    <div class="panel-head">
+      <h2>Bookings</h2>
+      <span class="hint">honour system — book a share of a GPU's VRAM for a time window; nothing is enforced</span>
+    </div>
+    <div class="bookings-layout">
+      <form id="book-form" class="book-form" autocomplete="off">
+        <h3>Book a GPU</h3>
+        <label for="book-user">user</label>
+        <select id="book-user" name="user" required></select>
+        <label for="book-gpu">GPU</label>
+        <select id="book-gpu" name="gpu"></select>
+        <label for="book-vram">VRAM (GiB, optional)</label>
+        <input id="book-vram" name="vram_gib" type="number" min="1" step="1" placeholder="whole card" inputmode="numeric">
+        <label for="book-from">from</label>
+        <input id="book-from" name="start" type="datetime-local" step="60" required>
+        <span class="label">until</span>
+        <div class="until">
+          <div class="controls" id="book-until-quick">
+            <button type="button" data-until="4h" class="active">+4 h</button>
+            <button type="button" data-until="1d">+1 day</button>
+            <button type="button" data-until="fri">Fri 18:00</button>
+            <button type="button" data-until="custom">custom</button>
+          </div>
+          <input id="book-until" name="end" type="datetime-local" step="60" aria-label="until (custom)" hidden>
+          <span id="book-until-text" class="muted"></span>
+        </div>
+        <label for="book-note">note</label>
+        <input id="book-note" name="note" type="text" maxlength="120" placeholder="optional, e.g. fine-tuning run">
+        <p id="book-preview" class="book-preview" aria-live="polite"></p>
+        <div class="book-actions"><button id="book-submit" type="submit" class="primary">Book</button></div>
+        <p id="book-error" class="book-error" role="alert" hidden></p>
+        <p id="book-ok" class="book-ok" role="status" hidden></p>
+      </form>
+      <div class="booking-side">
+        <h3>Next 14 days <span class="hint">bar height = booked share of the card · click a bar for details</span></h3>
+        <div id="booking-calendar" class="chart-wrap"></div>
+        <div id="booking-detail" class="booking-detail" hidden></div>
+      </div>
+    </div>
+    <h3>Recent changes</h3>
+    <ul id="booking-changes" class="booking-changes"></ul>
+  </section>
+
   <section id="timeline" class="panel">
     <div class="panel-head">
       <h2>Timeline — who does what when</h2>

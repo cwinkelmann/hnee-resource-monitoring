@@ -84,3 +84,36 @@ poll (default on) and pruned to 90 days (`--retention-days`).
 Energy caveats apply to every kWh figure: measured only while the monitor was running, and
 per-user kWh splits a card's draw by memory share when several processes share it, so it is an
 estimate, not a measurement.
+
+## Booking a GPU
+
+Book a share of a GPU on the dashboard (VRAM for a time window): pick your user, the GPU, how
+many GiB (1 GiB up to the card total), a start and an end, and an optional note (120
+characters max). A booking lasts at most **14 days**. To cancel, use the cancel button on your
+booking; cancelling keeps the row (marked cancelled), nothing is deleted. Leaving VRAM empty
+books the whole card.
+
+**Quick booking.** Each GPU card in *Now* has a `holder` dropdown. Picking a name books the whole
+card for that user from now until the next **09:00** (Europe/Berlin), so every morning the
+cards are free again; picking `— free —` releases it. The dropdown only works on a card with no
+active calendar booking (then it shows "booked — use the calendar", or "partly booked — use
+the calendar" when the bookings leave part of the card unbooked), and a quick booking
+ends early where a calendar booking on that GPU begins. It never cancels a calendar booking.
+
+This is an **honour system**. The dashboard is unauthenticated, so anyone on the LAN can book
+or cancel in any name; every change is shown with its time and IP address. Anyone who can
+reach the page can book or cancel, including through other host names or addresses that point
+at the server.
+
+Bookings are reported and **never enforced**: no process is ever signalled, limited or
+reprioritised. The monitor only compares each user's real VRAM use on a card with what they
+booked and alerts on a mismatch:
+
+- Use above **110 %** of the booked VRAM raises an alert (exactly 110 % does not).
+- Using a card someone booked, beyond its unbooked remainder, raises an alert; unbooked cards
+  and unbooked VRAM are free for anyone.
+- A quick hold (holder dropdown) blocks calendar bookings on that card until 09:00 unless its
+  holder is set back to free.
+
+Bookings live in `~/.local/state/resourcemonitor/claims.sqlite`, written only by the web
+process. If that file is missing or broken, monitoring carries on as if nothing were booked.

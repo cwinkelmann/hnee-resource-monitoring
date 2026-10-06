@@ -117,3 +117,31 @@ ssh cwinkelmann@10.188.1.1 'curl -s http://10.188.1.1:8765/healthz'
 
 Then open http://10.188.1.1:8765. Firewall caveat: if `healthz` works on carrot but the
 LAN cannot reach port 8765, ask carrot's admin to open it; do not change the firewall yourself.
+
+## Bookings
+
+GPU bookings live in `~/.local/state/resourcemonitor/claims.sqlite`, created and written only
+by the web process (`history.sqlite` stays read-only to it; `watch` reads claims read-only).
+After every code update restart **both** units, since the soak reads bookings and the web
+unit serves them:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'systemctl --user restart resourcemonitor-soak resourcemonitor-web'
+```
+
+The v1 -> v2 schema migration of `claims.sqlite` (adds the `kind` column; existing rows become
+`calendar`) happens automatically when the web process first opens the file for a booking
+write. There is no manual step. To keep a copy first, note the file is in WAL mode: a plain `cp`
+of `claims.sqlite` can miss every row (they may still sit in `claims.sqlite-wal`). Use the
+SQLite backup API instead:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'cd ~/.local/state/resourcemonitor && ~/miniconda3/envs/resourcemonitor/bin/python -c "import sqlite3; s=sqlite3.connect(\"file:claims.sqlite?mode=ro\", uri=True); d=sqlite3.connect(\"claims.sqlite.bak\"); s.backup(d); d.close()"'
+```
+
+Pre-check before deploying: quick bookings ("holder" dropdown, until 09:00 Europe/Berlin) need
+the IANA time-zone database. Without system tzdata the `/api/claims/quick` route answers 500:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 '~/miniconda3/envs/resourcemonitor/bin/python -c "import zoneinfo; zoneinfo.ZoneInfo(\"Europe/Berlin\")"'
+```

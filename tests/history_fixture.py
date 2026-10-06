@@ -1,14 +1,15 @@
 """Deterministic synthetic history shared by the history, query and web tests."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from resourcemonitor.claims import Booking
 from resourcemonitor.energy import EnergyLedger
 from resourcemonitor.history import HistoryWriter
 from resourcemonitor.model import GpuProcess, GpuState, Snapshot
 from resourcemonitor.policy import Policy
-from resourcemonitor.rules import check_allocation, check_unattributed
+from resourcemonitor.rules import check_bookings, check_unattributed
 
 TOTAL_MIB = 81559
 IDLE_W = 66.0
@@ -19,6 +20,14 @@ POLICY = Policy(
     idle_util_pct=5, idle_min_mib=1024, idle_grace_s=1800,
     capacity_free_mib=40960, cooldown_s=3600, channel="#gpu-watch",
 )
+
+_EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
+# cwinkelmann holds nearly all of GPUs 4, 6 and 7 for the whole fixture, so dorian's jobs
+# on 6 and 7 are "booked_gpu" incidents and 4's unattributed holder is reported.
+BOOKINGS = [Booking(id=i, user="cwinkelmann", gpu=g, vram_mib=79 * 1024, start=_EPOCH,
+                    end=_EPOCH + timedelta(days=365 * 100), note=None, created_at=_EPOCH,
+                    created_ip="10.0.0.1")
+            for i, g in enumerate((4, 6, 7), 1)]
 
 
 def _snapshot(t: datetime, elapsed_s: int) -> Snapshot:
@@ -56,7 +65,7 @@ def build_history(path: Path | str, start: datetime, hours: int, interval_s: int
                 continue
             snap = _snapshot(t, k * interval_s)
             dt_s, rows = ledger.accumulate(snap)
-            alerts = check_allocation(snap, POLICY) + check_unattributed(snap, POLICY)
+            alerts = check_bookings(snap, POLICY, BOOKINGS) + check_unattributed(snap, POLICY, BOOKINGS)
             writer.record(snap, dt_s, rows, alerts, {a.key for a in alerts} if first else set())
             first = False
     finally:

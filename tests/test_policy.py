@@ -31,11 +31,10 @@ def test_loads_assignments_as_sets_of_int(tmp_path):
     assert pol.cooldown_s == 3600
 
 
-def test_owner_of_gpu_maps_an_index_to_its_assignee(tmp_path):
-    pol = load_policy(_write(tmp_path, GOOD))
-
-    assert pol.owner_of_gpu(1) == "dorian.zwanzig"
-    assert pol.owner_of_gpu(7) is None, "an unassigned GPU belongs to nobody"
+def test_assignments_section_is_optional(tmp_path):
+    body = GOOD.split("[rules]", 1)[1]
+    pol = load_policy(_write(tmp_path, "[rules]" + body))
+    assert pol.assignments == {}
 
 
 def test_overlapping_assignments_are_rejected(tmp_path):
@@ -55,4 +54,4 @@ def test_unknown_gpu_index_is_rejected(tmp_path):
 
 def test_missing_section_names_the_section(tmp_path):
     with pytest.raises(ValueError, match="rules"):
-        load_policy(_write(tmp_path, '[assignments]\n"a" = [0]\n'))
+        load_policy(_write(tmp_path, '[assignments]\n"a" = [0]\n[notify]\ncooldown_s = 1\nchannel = "#c"\n'))

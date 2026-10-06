@@ -1960,4 +1960,4 @@ is specified as a plain script rather than an image.
 - **Telegram backend.** The `Notifier` interface is small enough to grow a second implementation if Slack proves wrong.
 - **Quiet hours.** Add only if the real alert volume turns out to be nocturnal.
 - **Multi-host.** `probe()` is local-only. Watching the t14 as well means either a second instance posting to the same channel, or an SSH-based probe — the former is simpler and has no credential story.
-- **Reserving/queueing GPUs.** Out of scope. This tool reports; it never arbitrates.
+- **Reserving/queueing GPUs.** Out of scope. This tool reports; it never arbitrates. — superseded 2026-10-06: see docs/superpowers/specs/2026-10-06-gpu-booking-design.md

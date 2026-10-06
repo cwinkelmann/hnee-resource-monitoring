@@ -1,14 +1,74 @@
-// carrot GPUs dashboard. Read-only: fetches the JSON API and renders it.
+// carrot GPUs dashboard: fetches the JSON API and renders it; the only writes are
+// bookings (honour system) through the Bookings form and the Cancel button.
 // All data enters the DOM through textContent or SVG attributes (never HTML strings).
 "use strict";
 
-(function () {
+// Minimum free MiB on `gpu` over [startMs, endMs), counting only uncancelled claims on that
+// GPU (a claim is active from its start, inclusive, to its end, exclusive). The worst instant
+// is always the window start or the start of a claim inside the window.
+function freeVramMiB(claims, gpu, startMs, endMs, cardMiB) {
+  const live = [];
+  for (const c of claims) {
+    if (c.gpu !== gpu || c.cancelled_at) continue;
+    const s = Date.parse(c.start), e = Date.parse(c.end);
+    if (s < endMs && e > startMs) live.push({ s: s, e: e, mib: c.vram_mib });
+  }
+  let worst = 0;
+  for (const t of [startMs].concat(live.map((c) => c.s).filter((s) => s > startMs))) {
+    let sum = 0;
+    for (const c of live) if (c.s <= t && t < c.e) sum += c.mib;
+    worst = Math.max(worst, sum);
+  }
+  return Math.max(0, cardMiB - worst);
+}
+
+// Per-key debounce: deliver(key, value) runs delayMs after the last push for that key, with
+// only the latest value; flush(key) delivers a pending value at once. schedule/cancel are
+// setTimeout/clearTimeout in the page and a fake clock in the tests.
+function makeDebouncer(delayMs, deliver, schedule, cancel) {
+  const pending = new Map();   // key -> { value, timer }
+  function fire(key) {
+    const p = pending.get(key);
+    if (!p) return;
+    pending.delete(key);
+    deliver(key, p.value);
+  }
+  return {
+    push(key, value) {
+      const p = pending.get(key);
+      if (p) cancel(p.timer);
+      pending.set(key, { value: value, timer: schedule(() => fire(key), delayMs) });
+    },
+    flush(key) {
+      const p = pending.get(key);
+      if (p) { cancel(p.timer); fire(key); }
+    },
+    pending(key) { return pending.has(key); },
+  };
+}
+if (typeof module !== "undefined") module.exports = { freeVramMiB, makeDebouncer };
+
+// Start-up only in a browser: Node loads this file for the tests above.
+if (typeof document !== "undefined") (function () {
   // Split so the file holds no URL literal (it is a namespace name, never fetched).
   const SVG_NS = "http:" + "//www.w3.org/2000/svg";
   const PALETTE_SIZE = 8;
   const EUR_PER_KWH = 0.30;
   const MAX_W = 700;
-  const ALERT_ICONS = { allocation: "⚠", idle: "◔", capacity: "▣", unattributed: "?", report: "Σ" };
+  const ALERT_ICONS = {
+    booked_gpu: "⚠", over_booking: "▲", idle: "◔", capacity: "▣", unattributed: "?", report: "Σ",
+  };
+  const RED_ALERTS = new Set(["booked_gpu", "over_booking"]);   // the only kinds that turn a card red
+  const DEFAULT_CARD_MIB = 81559;                                // same fallback as the server
+  const DEFAULT_GPUS = [0, 1, 2, 3, 4, 5, 6, 7];
+  const H_MS = 3600000, DAY_MS = 24 * H_MS;
+  const CALENDAR_DAYS = 14;
+  const CHANGES_SHOWN = 20;
+  const USER_KEY = "rm.user";
+  const HOLDER_ERROR_MS = 20000;              // how long a card shows a quick-booking error
+  // Arrow keys / type-ahead on a closed select fire change per keystroke (Windows, Linux):
+  // only the pick that stays this long is booked. Enter and leaving the dropdown send at once.
+  const HOLDER_DEBOUNCE_MS = 600;
 
   const state = {
     now: null, timeline: null, usage: null, timeseries: null,
@@ -17,6 +77,17 @@
     inflight: 0, failed: new Set(),
     timelineSeq: 0, usageSeq: 0,
     timelineTimer: null,
+    claims: null,            // GET /api/claims: the calendar, the form and recent changes
+    timelineClaims: [],      // GET /api/claims?days=1&back=N: bands behind the timeline
+    bookUsers: null,         // GET /api/users: who may book
+    selectedClaim: null,     // id shown in the details panel
+    cancelArmed: null,       // id whose "Cancel booking?" step is showing
+    untilMode: "4h",         // "4h" | "1d" | "fri" | "custom"
+    fromAuto: true,          // "from" follows the clock until the user edits it
+    booking: false,          // a POST is in flight
+    holderWant: new Map(),   // gpu -> the latest holder picked on its card ("" = free)
+    holderBusy: new Set(),   // gpus with a quick-booking POST in flight
+    holderErrors: new Map(), // gpu -> the last quick-booking error shown on its card
   };
 
   const $ = (id) => document.getElementById(id);
@@ -94,14 +165,80 @@
     return n;
   }
   function swatch(user) { return el("span", "swatch " + colourClass(user)); }
-  function isOutside(user, assignee) {
-    // Same rule as the allocation alert: unattributed is never accused, unassigned GPUs are free.
-    return user !== null && assignee !== null && assignee !== undefined && user !== assignee;
+
+  // ---------- bookings: shared helpers ----------
+  function nowGpu(gpu) {
+    return state.now ? state.now.gpus.find((x) => x.gpu === gpu) || null : null;
   }
-  function assigneeOf(gpu) {
-    if (!state.now) return null;
-    const g = state.now.gpus.find((x) => x.gpu === gpu);
-    return g ? g.assigned_to : null;
+  function cardMiB(gpu) {
+    const g = nowGpu(gpu);
+    return g && g.total_mib ? g.total_mib : DEFAULT_CARD_MIB;
+  }
+  function gpuIds() {
+    return state.now && state.now.gpus.length ? state.now.gpus.map((g) => g.gpu).sort((a, b) => a - b)
+      : DEFAULT_GPUS;
+  }
+  // When a claim really held its share: a cancelled one stops at its cancellation (null: never).
+  function claimSpan(c) {
+    const s = Date.parse(c.start);
+    let e = Date.parse(c.end);
+    if (c.cancelled_at) e = Math.min(e, Date.parse(c.cancelled_at));
+    return e > s ? { s: s, e: e } : null;
+  }
+  // Display hint only (the VRAM-precise judgement is the live booked_gpu alert): the job's user
+  // had no booking on this GPU while someone else's booking was active during part of the job.
+  function onSomeoneElsesBooking(user, gpu, s, e) {
+    if (user === null) return false;          // unattributed is never accused
+    let own = false, other = false;
+    for (const c of state.timelineClaims) {
+      if (c.gpu !== gpu) continue;
+      const w = claimSpan(c);
+      if (!w || w.s >= e || w.e <= s) continue;
+      if (c.user === user) own = true; else other = true;
+    }
+    return other && !own;
+  }
+  function gibText(mib) {                       // 40960 -> "40", 40500 -> "39.6"
+    const g = mib / 1024;
+    return Number.isInteger(g) ? String(g) : g.toFixed(1);
+  }
+  function sameDay(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+  // "18:00" today, "Fri 18:00" within a week either way, "Fri 16 Oct 18:00" further off.
+  function fmtWhen(d) {
+    const now = new Date();
+    if (sameDay(d, now)) return fmtTime(d);
+    const opts = Math.abs(d - now) < 6 * DAY_MS ? { weekday: "short" }
+      : { weekday: "short", day: "2-digit", month: "short" };
+    return d.toLocaleDateString(undefined, opts) + " " + fmtTime(d);
+  }
+  // ISO with the browser's offset, as the server requires: 2026-10-09T18:00:00+02:00
+  function isoWithOffset(d) {
+    const off = -d.getTimezoneOffset(), a = Math.abs(off);
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate())
+      + "T" + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":00"
+      + (off < 0 ? "-" : "+") + pad2(Math.floor(a / 60)) + ":" + pad2(a % 60);
+  }
+  function inputValue(d) {                      // value for <input type="datetime-local">
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate())
+      + "T" + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+  function parseInput(v) {                      // "YYYY-MM-DDTHH:MM" is local time; NaN if empty
+    return v ? new Date(v).getTime() : NaN;
+  }
+  function nextFriday18(fromMs) {               // the next Friday 18:00 local strictly after fromMs
+    const d = new Date(fromMs);
+    d.setHours(18, 0, 0, 0);
+    d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7));
+    if (d.getTime() <= fromMs) d.setDate(d.getDate() + 7);
+    return d.getTime();
+  }
+  function storedUser() {
+    try { return window.localStorage.getItem(USER_KEY); } catch (e) { return null; }
+  }
+  function storeUser(name) {
+    try { window.localStorage.setItem(USER_KEY, name); } catch (e) { /* page works without it */ }
   }
 
   // ---------- fetching ----------
@@ -149,17 +286,63 @@
     showEmpty(false);
     state.now = data;
     const names = [];
-    for (const g of data.gpus) { names.push(g.assigned_to); for (const p of g.procs) names.push(p.user); }
-    if (registerUsers(names)) renderAll(); else { renderNow(); renderTimeline(); }
+    for (const g of data.gpus) {
+      for (const b of g.bookings) names.push(b.user);
+      for (const p of g.procs) names.push(p.user);
+    }
+    if (registerUsers(names)) renderAll(); else { renderNow(); renderTimeline(); renderBookings(); }
   }
   async function loadTimeline() {
     const seq = ++state.timelineSeq;
-    const data = await getJson("timeline", "/api/timeline?hours=" + state.timelineHours);
+    const [data, claims] = await Promise.all([
+      getJson("timeline", "/api/timeline?hours=" + state.timelineHours),
+      // bookings for the whole visible range (+1 day of margin), capped by the server at 30 days back
+      getJson("timeline-claims", "/api/claims?days=1&back="
+        + Math.min(30, Math.ceil(state.timelineHours / 24) + 1)),
+    ]);
     if (!data || seq !== state.timelineSeq) return;
     state.timeline = data;
-    const names = [];
+    if (claims) state.timelineClaims = claims.claims;
+    const names = state.timelineClaims.map((c) => c.user);
     for (const k in data.gpus) for (const j of data.gpus[k]) names.push(j.user);
     if (registerUsers(names)) renderAll(); else renderTimeline();
+  }
+  async function loadClaims() {
+    const data = await getJson("claims", "/api/claims");
+    if (!data) return;
+    state.claims = data.claims;
+    if (registerUsers(data.claims.map((c) => c.user))) renderAll(); else renderBookings();
+  }
+  async function loadBookUsers() {
+    const data = await getJson("users", "/api/users");
+    if (!data) return;
+    state.bookUsers = data.users;
+    renderUserSelect();
+    renderNow();                                  // the cards' holder dropdowns list the users
+  }
+  // POST a JSON body; resolves to {status, body} (body null when not JSON), status 0 if unreachable.
+  async function postJson(url, payload) {
+    setBusy(1);
+    try {
+      const r = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      let body = null;
+      try { body = await r.json(); } catch (e) { /* not JSON */ }
+      return { status: r.status, body: body };
+    } catch (e) {
+      return { status: 0, body: null };
+    } finally {
+      setBusy(-1);
+    }
+  }
+  function errorText(res) {
+    if (res.status === 0) return "Couldn't reach the server — nothing was booked or cancelled.";
+    const b = res.body || {};
+    if (b.detail) return b.detail;                        // the server's detail, verbatim
+    if (res.status === 429) return "Too many bookings from this computer in the last hour — try again later.";
+    if (res.status === 403) return "This request was refused (cross-site check).";
+    return b.error || "HTTP " + res.status;
   }
   async function loadUsage() {
     const seq = ++state.usageSeq;
@@ -178,7 +361,7 @@
     renderTimeseries();
   }
 
-  function renderAll() { renderNow(); renderTimeline(); renderUsage(); renderTimeseries(); }
+  function renderAll() { renderNow(); renderBookings(); renderTimeline(); renderUsage(); renderTimeseries(); }
 
   // ---------- header + Now ----------
   function renderNow() {
@@ -194,8 +377,24 @@
       ? "Monitor not running since " + fmtLocal(polled) + " — numbers below are not live" : "";
 
     const grid = $("gpu-grid");
-    clear(grid);
-    for (const g of d.gpus) grid.appendChild(gpuCard(g));
+    const red = new Set(d.alerts.filter((a) => RED_ALERTS.has(a.kind)).map((a) => a.gpu));
+    // A holder dropdown that has focus (or is open) is never rebuilt under the user: its
+    // card is refreshed around it instead, and the dropdown catches up after the change.
+    const keep = document.activeElement;
+    if (!(keep && keep.classList.contains("holder") && grid.contains(keep))) {
+      clear(grid);
+      for (const g of d.gpus) grid.appendChild(gpuCard(g, red.has(g.gpu)));
+    } else {
+      const oldCard = keep.closest(".card");
+      for (const c of Array.from(grid.childNodes)) if (c !== oldCard) grid.removeChild(c);
+      let before = true;
+      for (const g of d.gpus) {
+        const card = gpuCard(g, red.has(g.gpu));
+        if (String(g.gpu) === keep.dataset.gpu) { refreshCardAround(oldCard, card, keep.parentNode); before = false; }
+        else if (before) grid.insertBefore(card, oldCard);
+        else grid.appendChild(card);
+      }
+    }
 
     // Slack wording only when the monitor recorded its mode: one line for a dry run,
     // a per-alert status only when it is really posting, nothing for older histories.
@@ -218,31 +417,55 @@
     }
   }
 
-  function gpuCard(g) {
-    const outside = g.procs.some((p) => isOutside(p.user, g.assigned_to));
-    const card = el("div", "card" + (outside ? " outside" : ""));
+  function gpuCard(g, red) {
+    const card = el("div", "card" + (red ? " flagged" : ""));
     const head = el("div", "card-head");
     head.appendChild(el("span", "gpu", "GPU " + g.gpu));
-    head.appendChild(el("span", "assignee", "assigned to " + (g.assigned_to || "—")));
+    head.appendChild(holderNode(g));
+    head.appendChild(el("span", "free", fmtGiB(g.free_mib) + " free"));
     card.appendChild(head);
-    if (outside) card.appendChild(el("span", "tag-outside", "outside allocation"));
+    const err = state.holderErrors.get(g.gpu);
+    if (err) card.appendChild(el("p", "holder-error", err));
 
-    // VRAM bar: one segment per process in its user's colour; the rest of "used" in grey.
-    const bar = svg("svg", { viewBox: "0 0 1000 10", preserveAspectRatio: "none", role: "img" }, "vram");
-    bar.appendChild(svg("rect", { x: 0, y: 0, width: 1000, height: 10, rx: 0 }, "track"));
+    const booked = el("ul", "card-bookings");
+    if (!g.bookings.length) booked.appendChild(el("li", "none", "not booked"));
+    for (const b of g.bookings.slice(0, 2)) {
+      const li = el("li");
+      li.appendChild(swatch(b.user));
+      li.appendChild(el("span", "", b.user + " " + gibText(b.vram_mib) + " GiB until " + fmtWhen(new Date(b.end))));
+      if (b.note) li.title = b.note;
+      booked.appendChild(li);
+    }
+    if (g.bookings.length > 2) booked.appendChild(el("li", "more", "+" + (g.bookings.length - 2) + " more"));
+    card.appendChild(booked);
+
+    // VRAM bar: booked shares as outlined segments, actual usage filled on top
+    // (one segment per process in its user's colour; the rest of "used" in grey).
+    const VB_H = 12;
+    const bar = svg("svg", { viewBox: "0 0 1000 " + VB_H, preserveAspectRatio: "none", role: "img" }, "vram");
+    bar.appendChild(svg("rect", { x: 0, y: 0, width: 1000, height: VB_H, rx: 0 }, "track"));
     const total = g.total_mib || 1;
+    let bx = 0;
+    for (const b of g.bookings) {
+      const w = Math.min(1000 - bx, (b.vram_mib / total) * 1000);
+      if (w <= 0) continue;
+      const seg = svg("rect", { x: bx, y: 0.75, width: w, height: VB_H - 1.5 }, "booked " + colourClass(b.user));
+      addTitle(seg, b.user + " booked " + gibText(b.vram_mib) + " GiB until " + fmtWhen(new Date(b.end)));
+      bar.appendChild(seg);
+      bx += w;
+    }
     let x = 0, procMib = 0;
     for (const p of g.procs) {
       const w = Math.min(1000 - x, (p.used_mib / total) * 1000);
       if (w <= 0) continue;
-      const seg = svg("rect", { x: x, y: 0, width: w, height: 10 }, colourClass(p.user));
+      const seg = svg("rect", { x: x, y: 3, width: w, height: VB_H - 6 }, colourClass(p.user));
       addTitle(seg, (p.user || "unattributed") + " · " + p.used_mib + " MiB");
       bar.appendChild(seg);
       x += w; procMib += p.used_mib;
     }
     const rest = Math.min(1000 - x, (Math.max(0, g.used_mib - procMib) / total) * 1000);
-    if (rest > 0) bar.appendChild(svg("rect", { x: x, y: 0, width: rest, height: 10 }, "idle"));
-    addTitle(bar, g.used_mib + " / " + g.total_mib + " MiB used");
+    if (rest > 0) bar.appendChild(svg("rect", { x: x, y: 3, width: rest, height: VB_H - 6 }, "idle"));
+    addTitle(bar, g.used_mib + " / " + g.total_mib + " MiB used · " + g.booked_mib + " MiB booked");
     card.appendChild(bar);
     card.appendChild(el("div", "vram-label",
       "VRAM " + fmtGiB(g.used_mib) + " / " + fmtGiB(g.total_mib)));
@@ -267,6 +490,452 @@
     }
     card.appendChild(ul);
     return card;
+  }
+
+  // ---------- quick booking: the holder dropdown on each card ----------
+  // The GPU's quick booking (whole card until 09:00) and whether a calendar booking is active.
+  function holderOf(g) {
+    const cal = g.bookings.filter((b) => b.kind !== "quick");
+    return {
+      quick: g.bookings.find((b) => b.kind === "quick") || null,
+      calendar: cal.length > 0,
+      wholeCard: cal.length > 0 && cal.reduce((s, b) => s + b.vram_mib, 0) >= g.total_mib,
+    };
+  }
+  function holderHint(h) {
+    if (h.calendar) return h.wholeCard ? "booked — use the calendar" : "partly booked — use the calendar";
+    return h.quick ? "until " + fmtTime(new Date(h.quick.end)) : "";
+  }
+  function holderNode(g) {
+    const h = holderOf(g);
+    const wrap = el("span", "holder-wrap");
+    const sel = el("select", "holder");
+    sel.setAttribute("aria-label", "holder of GPU " + g.gpu);
+    sel.dataset.gpu = String(g.gpu);
+    if (h.calendar) {                     // the quick dropdown never touches calendar bookings
+      sel.appendChild(el("option", "", "— calendar —"));
+      sel.disabled = true;
+    } else {
+      const free = el("option", "", "— free —");
+      free.value = "";
+      sel.appendChild(free);
+      const names = (state.bookUsers || []).slice();
+      if (h.quick && !names.includes(h.quick.user)) names.push(h.quick.user);
+      for (const u of names) {
+        const o = el("option", "", u);
+        o.value = u;
+        sel.appendChild(o);
+      }
+      sel.value = h.quick ? h.quick.user : "";
+      sel.addEventListener("change", () => holderDebounce.push(g.gpu, { sel: sel, value: sel.value }));
+      sel.addEventListener("keydown", (e) => { if (e.key === "Enter") holderDebounce.flush(g.gpu); });
+      sel.addEventListener("blur", () => holderDebounce.flush(g.gpu));
+    }
+    wrap.appendChild(sel);
+    wrap.appendChild(el("span", "hint holder-hint", holderHint(h)));
+    return wrap;
+  }
+  // Replace oldNode's children with newNode's, except `kept` (in oldNode), which stays where
+  // `slot` (in newNode) is.
+  function replaceAround(oldNode, newNode, kept, slot) {
+    for (const c of Array.from(oldNode.childNodes)) if (c !== kept) oldNode.removeChild(c);
+    let after = false;
+    for (const c of Array.from(newNode.childNodes)) {
+      if (c === slot) after = true;
+      else if (after) oldNode.appendChild(c);
+      else oldNode.insertBefore(c, kept);
+    }
+    oldNode.className = newNode.className;
+  }
+  function refreshCardAround(oldCard, newCard, oldWrap) {
+    const newWrap = newCard.querySelector(".holder-wrap");
+    replaceAround(oldCard, newCard, oldWrap.parentNode, newWrap.parentNode);
+    replaceAround(oldWrap.parentNode, newWrap.parentNode, oldWrap, newWrap);
+  }
+  // Show the server's state in a dropdown that was kept because it had focus.
+  function syncHolder(gpu, sel) {
+    const g = nowGpu(gpu);
+    if (!g || !sel.isConnected || holderDebounce.pending(gpu)) return;   // a newer pick waits
+    const h = holderOf(g);
+    if (h.calendar) { sel.blur(); renderNow(); return; }   // rebuilt as the disabled dropdown
+    const want = h.quick ? h.quick.user : "";
+    if (want && !Array.from(sel.options).some((o) => o.value === want)) { sel.blur(); renderNow(); return; }
+    if (sel.value !== want) sel.value = want;
+    sel.parentNode.querySelector(".holder-hint").textContent = holderHint(h);
+  }
+  const holderDebounce = makeDebouncer(HOLDER_DEBOUNCE_MS,
+    (gpu, pick) => setHolder(gpu, pick.sel, pick.value),
+    (fn, ms) => setTimeout(fn, ms), (t) => clearTimeout(t));
+  // One request per GPU at a time; picks made meanwhile are sent next, the latest one wins.
+  async function setHolder(gpu, sel, value) {
+    state.holderWant.set(gpu, value);
+    if (state.holderBusy.has(gpu)) return;
+    state.holderBusy.add(gpu);
+    let res, sent;
+    try {
+      do {
+        sent = state.holderWant.get(gpu);
+        res = await postJson("/api/claims/quick", { user: sent || null, gpu: gpu });
+      } while ((res.status === 200 || res.status === 201) && state.holderWant.get(gpu) !== sent);
+    } finally {
+      state.holderBusy.delete(gpu);
+      state.holderWant.delete(gpu);
+    }
+    if (res.status === 200 || res.status === 201) state.holderErrors.delete(gpu);
+    else {
+      const text = errorText(res);
+      state.holderErrors.set(gpu, text);
+      setTimeout(() => {                      // the error line goes after a while
+        if (state.holderErrors.get(gpu) === text) { state.holderErrors.delete(gpu); renderNow(); }
+      }, HOLDER_ERROR_MS);
+    }
+    await loadNow();
+    syncHolder(gpu, sel);
+    renderNow();                              // shows or clears the card's error line
+    loadClaims();
+  }
+
+  // ---------- Bookings ----------
+  function renderBookings() {
+    if (!state.claims) return;
+    renderGpuOptions();
+    renderPreview();
+    renderCalendar();
+    renderDetail();
+    renderChanges();
+  }
+
+  // The window the form describes, in ms (NaN when unset or unparsable).
+  function formWindow() {
+    if (state.fromAuto) {
+      const now = new Date();
+      now.setSeconds(0, 0);
+      $("book-from").value = inputValue(now);
+    }
+    const from = parseInput($("book-from").value);
+    let until = NaN;
+    if (!isNaN(from)) {
+      if (state.untilMode === "4h") until = from + 4 * H_MS;
+      else if (state.untilMode === "1d") until = from + DAY_MS;
+      else if (state.untilMode === "fri") until = nextFriday18(from);
+      else until = parseInput($("book-until").value);
+    }
+    return { from: from, until: until };
+  }
+  function windowFree(gpu, w) {
+    if (isNaN(w.from) || isNaN(w.until) || w.until <= w.from) return cardMiB(gpu);
+    return freeVramMiB(state.claims || [], gpu, w.from, w.until, cardMiB(gpu));
+  }
+
+  function renderUserSelect() {
+    const sel = $("book-user");
+    const keep = sel.value || storedUser();
+    clear(sel);
+    const ph = el("option", "", "— who are you? —");
+    ph.value = "";
+    sel.appendChild(ph);
+    for (const u of state.bookUsers || []) {
+      const o = el("option", "", u);
+      o.value = u;
+      sel.appendChild(o);
+    }
+    if (keep && (state.bookUsers || []).includes(keep)) sel.value = keep;
+  }
+
+  function renderGpuOptions() {
+    const sel = $("book-gpu");
+    const keep = sel.value;
+    const w = formWindow();
+    clear(sel);
+    for (const gpu of gpuIds()) {
+      const o = el("option", "", "GPU " + gpu + " — " + fmtGiB(windowFree(gpu, w)) + " free");
+      o.value = String(gpu);
+      sel.appendChild(o);
+    }
+    if (keep !== "") sel.value = keep;
+  }
+
+  function renderPreview() {
+    const w = formWindow();
+    const gpu = Number($("book-gpu").value);
+    const vram = $("book-vram");
+    const preview = $("book-preview");
+    $("book-until-text").textContent = isNaN(w.until) ? "" : "until " + fmtWhen(new Date(w.until));
+    if (isNaN(w.from) || isNaN(w.until)) { preview.textContent = "Pick when the booking starts and ends."; return; }
+    if (w.until <= w.from) { preview.textContent = "“Until” must be after “from”."; return; }
+    const free = windowFree(gpu, w), card = cardMiB(gpu);
+    vram.max = String(Math.floor(free / 1024));
+    const span = " on GPU " + gpu + " from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until));
+    if (!vram.value) {                          // VRAM is optional: empty books the whole card
+      preview.textContent = free < card
+        ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is free in that window — enter less VRAM or pick another time."
+        : "You'd book the whole card (" + fmtGiB(card) + ")" + span + ".";
+      return;
+    }
+    const gib = Number(vram.value);
+    if (!(gib > 0)) {
+      preview.textContent = "GPU " + gpu + " has " + fmtGiB(free) + " of " + fmtGiB(card)
+        + " free from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until)) + ".";
+      return;
+    }
+    const left = free - gib * 1024;
+    preview.textContent = left < 0
+      ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is free in that window — book less or pick another time."
+      : "You'd book " + gibText(gib * 1024) + " of " + fmtGiB(card) + span
+        + "; " + fmtGiB(left) + " stays free.";
+  }
+
+  function showBookError(text) {
+    const e = $("book-error");
+    e.textContent = text || "";
+    e.hidden = !text;
+  }
+
+  async function submitBooking(ev) {
+    ev.preventDefault();
+    if (state.booking) return;
+    const w = formWindow();
+    const user = $("book-user").value;
+    const note = $("book-note").value.trim();
+    $("book-ok").hidden = true;
+    if (!user) { showBookError("Pick your user name first."); return; }
+    if (isNaN(w.from) || isNaN(w.until)) { showBookError("Pick when the booking starts and ends."); return; }
+    const payload = {
+      user: user, gpu: Number($("book-gpu").value),
+      start: isoWithOffset(new Date(w.from)), end: isoWithOffset(new Date(w.until)),
+    };
+    const vram = $("book-vram").value;
+    if (vram) payload.vram_gib = Number(vram);  // omitted: the server books the whole card
+    if (note) payload.note = note;
+    state.booking = true;
+    $("book-submit").disabled = true;
+    const res = await postJson("/api/claims", payload);
+    state.booking = false;
+    $("book-submit").disabled = false;
+    if (res.status !== 201 || !res.body || !res.body.claim) { showBookError(errorText(res)); return; }
+    showBookError("");
+    const c = res.body.claim;
+    const ok = $("book-ok");
+    ok.textContent = "Booked GPU " + c.gpu + ", " + gibText(c.vram_mib) + " GiB for " + c.user
+      + " until " + fmtWhen(new Date(c.end)) + ".";
+    ok.hidden = false;
+    $("book-note").value = "";
+    state.selectedClaim = c.id;
+    state.cancelArmed = null;
+    loadClaims();
+    loadNow();
+  }
+
+  // Bars are stacked by booked share: each claim (in start order) takes the lowest offset that
+  // does not collide with an already placed claim overlapping it in time. Offsets are 0..1.
+  function stackClaims(claims) {
+    const placed = [];
+    const sorted = claims.slice().sort((a, b) => a.s - b.s || a.c.id - b.c.id);
+    for (const it of sorted) {
+      const over = placed.filter((p) => p.s < it.e && it.s < p.e);
+      const cands = [0].concat(over.map((p) => p.off + p.h)).sort((a, b) => a - b);
+      const fits = (off) => over.every((p) => off + it.h <= p.off + 1e-9 || off >= p.off + p.h - 1e-9);
+      it.off = cands.find((off) => fits(off) && off + it.h <= 1 + 1e-9);
+      if (it.off === undefined) it.off = cands.find(fits);
+      placed.push(it);
+    }
+    return sorted;
+  }
+
+  function renderCalendar() {
+    const wrap = $("booking-calendar");
+    clear(wrap);
+    const W = Math.max(560, wrap.clientWidth || 0);
+    const labelW = 56, padR = 12, axisH = 22, rowH = 46, rowPad = 3;
+    const t0 = Date.now(), t1 = t0 + CALENDAR_DAYS * DAY_MS;
+    const ids = gpuIds();
+    const H = axisH + ids.length * rowH + 4;
+    const plotW = W - labelW - padR;
+    const x = (t) => labelW + ((Math.min(Math.max(t, t0), t1) - t0) / (t1 - t0)) * plotW;
+    const chart = svg("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img" }, "calendar");
+    addTitle(chart, "Bookings per GPU, now to +" + CALENDAR_DAYS + " days; bar height = booked share of the card");
+
+    ids.forEach((gpu, i) => {
+      const y = axisH + i * rowH;
+      if (i % 2 === 0) chart.appendChild(svg("rect", { x: 0, y: y, width: W, height: rowH }, "row-band"));
+      chart.appendChild(svgText(8, y + rowH / 2 + 4, "GPU " + gpu, "row-label"));
+    });
+    // day ticks at local midnight, the day's name centred in its span
+    const d = new Date(t0);
+    d.setHours(0, 0, 0, 0);
+    for (; d.getTime() < t1; d.setDate(d.getDate() + 1)) {
+      const s = d.getTime(), next = new Date(d); next.setDate(next.getDate() + 1);
+      if (s > t0) chart.appendChild(svg("line", { x1: x(s), x2: x(s), y1: axisH - 4, y2: H - 4 }, "grid"));
+      const xs = x(s), xe = x(next.getTime()), cx = (xs + xe) / 2;
+      if (cx - labelW < 34) continue;               // keep "now" legible
+      const label = xe - xs >= 50 ? d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })
+        : xe - xs >= 18 ? String(d.getDate()) : "";
+      if (label) chart.appendChild(svgText(cx, 13, label, "", "middle"));
+    }
+    chart.appendChild(svg("line", { x1: labelW, x2: labelW, y1: axisH - 4, y2: H - 4 }, "axis-line"));
+
+    let any = false;
+    ids.forEach((gpu, i) => {
+      const rowY = axisH + i * rowH + rowPad, inner = rowH - 2 * rowPad, card = cardMiB(gpu);
+      const items = [];
+      for (const c of state.claims) {
+        if (c.gpu !== gpu || c.cancelled_at) continue;
+        const s = Date.parse(c.start), e = Date.parse(c.end);
+        if (e <= t0 || s >= t1) continue;
+        items.push({ c: c, s: s, e: e, h: Math.min(1, c.vram_mib / card) });
+      }
+      for (const it of stackClaims(items)) {
+        any = true;
+        const c = it.c;
+        const bx = x(it.s), bw = Math.max(3, x(it.e) - bx);
+        const bh = Math.max(3, it.h * inner - 1);
+        const by = rowY + inner - (it.off * inner) - bh;   // first booking sits on the row's floor
+        const g = svg("g", { tabindex: 0, role: "button" },
+          "cal-bar" + (state.selectedClaim === c.id ? " selected" : ""));
+        g.appendChild(svg("rect", { x: bx, y: by, width: bw, height: bh, rx: 2 }, colourClass(c.user)));
+        // longest label that fits: with the note, "user · NN GiB", then just "NN GiB"
+        const full = c.user + " · " + gibText(c.vram_mib) + " GiB";
+        const maxChars = Math.floor((bw - 8) / 6.3);
+        const label = [c.note ? full + " · " + c.note : null, full, gibText(c.vram_mib) + " GiB"]
+          .find((t) => t !== null && t.length <= maxChars);
+        if (bh >= 13 && label) g.appendChild(svgText(bx + 4, by + bh / 2 + 4, label, "bar-label"));
+        addTitle(g, c.user + " · " + gibText(c.vram_mib) + " GiB on GPU " + gpu + "\n"
+          + fmtLocal(new Date(c.start)) + " – " + fmtLocal(new Date(c.end))
+          + (c.note ? "\n" + c.note : "") + "\nclick for details");
+        const pick = () => { state.selectedClaim = c.id; state.cancelArmed = null; renderCalendar(); renderDetail(); };
+        g.addEventListener("click", pick);
+        g.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); }
+        });
+        chart.appendChild(g);
+      }
+    });
+    if (!any) {
+      chart.appendChild(svgText(labelW + plotW / 2, axisH + (ids.length * rowH) / 2,
+        "No bookings in the next " + CALENDAR_DAYS + " days — every GPU is free", "empty-note", "middle"));
+    }
+    chart.appendChild(svg("line", { x1: labelW, x2: labelW, y1: axisH - 6, y2: H - 2 }, "now-line"));
+    chart.appendChild(svgText(labelW, 13, "now", "now-label", "start"));
+    wrap.appendChild(chart);
+  }
+
+  function detailRow(dl, term, value) {
+    dl.appendChild(el("dt", "", term));
+    dl.appendChild(el("dd", "", value));
+  }
+  function renderDetail() {
+    const box = $("booking-detail");
+    const c = state.claims && state.claims.find((x) => x.id === state.selectedClaim);
+    clear(box);
+    box.hidden = !c;
+    if (!c) return;
+    const head = el("div", "detail-head");
+    head.appendChild(swatch(c.user));
+    head.appendChild(el("b", "", c.user + " · GPU " + c.gpu + " · " + gibText(c.vram_mib) + " GiB"));
+    const close = el("button", "link", "close");
+    close.type = "button";
+    close.addEventListener("click", () => {
+      state.selectedClaim = null; state.cancelArmed = null; renderCalendar(); renderDetail();
+    });
+    head.appendChild(close);
+    box.appendChild(head);
+    const dl = el("dl");
+    detailRow(dl, "window", fmtLocal(new Date(c.start)) + " – " + fmtLocal(new Date(c.end)));
+    if (c.note) detailRow(dl, "note", c.note);
+    detailRow(dl, "booked", fmtLocal(new Date(c.created_at)) + " from " + c.created_ip);
+    if (c.cancelled_at) detailRow(dl, "cancelled", fmtLocal(new Date(c.cancelled_at)) + " from " + c.cancelled_ip);
+    box.appendChild(dl);
+
+    const actions = el("div", "detail-actions");
+    const err = el("p", "book-error");
+    err.hidden = true;
+    if (!c.cancelled_at && Date.parse(c.end) > Date.now()) {
+      if (state.cancelArmed !== c.id) {
+        const b = el("button", "danger", "Cancel booking");
+        b.type = "button";
+        b.addEventListener("click", () => { state.cancelArmed = c.id; renderDetail(); });
+        actions.appendChild(b);
+      } else {
+        actions.appendChild(el("span", "confirm-q", "Cancel booking?"));
+        const yes = el("button", "danger", "Yes, cancel");
+        yes.type = "button";
+        const keep = el("button", "", "Keep");
+        keep.type = "button";
+        keep.addEventListener("click", () => { state.cancelArmed = null; renderDetail(); });
+        yes.addEventListener("click", async () => {
+          yes.disabled = true; keep.disabled = true;
+          const res = await postJson("/api/claims/" + c.id + "/cancel", {});
+          if (res.status !== 200) {
+            yes.disabled = false; keep.disabled = false;
+            err.textContent = errorText(res); err.hidden = false;
+            return;
+          }
+          state.cancelArmed = null;
+          loadClaims();
+          loadNow();
+        });
+        actions.appendChild(yes);
+        actions.appendChild(keep);
+      }
+    } else {
+      actions.appendChild(el("span", "muted", c.cancelled_at ? "cancelled" : "ended"));
+    }
+    box.appendChild(actions);
+    box.appendChild(err);
+  }
+
+  function renderChanges() {
+    const ul = $("booking-changes");
+    clear(ul);
+    const events = [];
+    for (const c of state.claims) {
+      events.push({ t: Date.parse(c.created_at), what: "booked", ip: c.created_ip, c: c });
+      if (c.cancelled_at) events.push({ t: Date.parse(c.cancelled_at), what: "cancelled", ip: c.cancelled_ip, c: c });
+    }
+    events.sort((a, b) => b.t - a.t || b.c.id - a.c.id);
+    if (!events.length) ul.appendChild(el("li", "none", "No bookings yet."));
+    for (const ev of events.slice(0, CHANGES_SHOWN)) {
+      const c = ev.c;
+      const li = el("li", ev.what);
+      li.appendChild(swatch(c.user));
+      // the window's start only when it was not "right away"
+      const from = Date.parse(c.start) - Date.parse(c.created_at) > 5 * 60000
+        ? " from " + fmtWhen(new Date(c.start)) : "";
+      li.appendChild(el("span", "", fmtWhen(new Date(ev.t)) + " · " + ev.what + " GPU " + c.gpu + ", "
+        + gibText(c.vram_mib) + " GiB, for " + c.user + from + " until " + fmtWhen(new Date(c.end))
+        + " · from " + ev.ip));
+      if (c.note) li.title = c.note;
+      ul.appendChild(li);
+    }
+  }
+
+  function bindBookingForm() {
+    $("book-form").addEventListener("submit", submitBooking);
+    $("book-user").addEventListener("change", () => { if ($("book-user").value) storeUser($("book-user").value); });
+    $("book-gpu").addEventListener("change", renderPreview);
+    $("book-vram").addEventListener("input", renderPreview);
+    $("book-from").addEventListener("input", () => {
+      state.fromAuto = $("book-from").value === "";
+      renderGpuOptions(); renderPreview();
+    });
+    $("book-until").addEventListener("input", () => { renderGpuOptions(); renderPreview(); });
+    const quick = $("book-until-quick");
+    quick.addEventListener("click", (ev) => {
+      const b = ev.target.closest("button");
+      if (!b || !quick.contains(b)) return;
+      const mode = b.getAttribute("data-until");
+      if (mode === "custom" && state.untilMode !== "custom") {
+        const w = formWindow();                    // start the custom value from the current pick
+        if (!isNaN(w.until)) $("book-until").value = inputValue(new Date(w.until));
+      }
+      state.untilMode = mode;
+      for (const other of quick.querySelectorAll("button")) other.classList.toggle("active", other === b);
+      $("book-until").hidden = mode !== "custom";
+      renderGpuOptions(); renderPreview();
+    });
+    renderUserSelect();
+    renderGpuOptions();
+    renderPreview();
   }
 
   // ---------- Timeline ----------
@@ -295,6 +964,14 @@
       return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
     }
     return fmtTime(d);
+  }
+
+  function bookedNowLabel(gpu) {
+    const g = nowGpu(gpu);
+    if (!g || !g.bookings.length) return "not booked";
+    let label = "booked: " + Array.from(new Set(g.bookings.map((b) => b.user))).join(", ");
+    if (label.length > 30) label = label.slice(0, 29) + "…";
+    return label;
   }
 
   // Greedy sub-lanes for one GPU row: each job goes in the first lane whose last end
@@ -347,8 +1024,24 @@
     rows.forEach((r, i) => {
       if (i % 2 === 0) chart.appendChild(svg("rect", { x: 0, y: r.y, width: W, height: r.h }, "row-band"));
       chart.appendChild(svgText(8, r.y + 14, "GPU " + r.gpu, "row-label"));
-      chart.appendChild(svgText(8, r.y + 27, "assigned to " + (assigneeOf(r.gpu) || "—"), "row-sub"));
+      chart.appendChild(svgText(8, r.y + 27, bookedNowLabel(r.gpu), "row-sub"));
     });
+
+    // Bookings as faint bands behind the job bars (x() clips them to the axis).
+    let anyBand = false;
+    for (const r of rows) {
+      for (const c of state.timelineClaims) {
+        const w = c.gpu === r.gpu ? claimSpan(c) : null;
+        if (!w || w.e <= t0 || w.s >= t1) continue;
+        anyBand = true;
+        const band = svg("rect", { x: x(w.s), y: r.y + 1, width: Math.max(1, x(w.e) - x(w.s)), height: r.h - 2 },
+          "band " + colourClass(c.user));
+        addTitle(band, "booked by " + c.user + " · " + gibText(c.vram_mib) + " GiB · "
+          + fmtLocal(new Date(c.start)) + " – " + fmtLocal(new Date(c.end))
+          + (c.cancelled_at ? " (cancelled " + fmtLocal(new Date(c.cancelled_at)) + ")" : ""));
+        chart.appendChild(band);
+      }
+    }
 
     const nowX = x(t1);
     for (const tk of timeTicks(t0, t1, plotW)) {
@@ -362,7 +1055,6 @@
     let anyUnatt = false, anyOutside = false, anyJob = false;
     for (const r of rows) {
       const gpu = r.gpu;
-      const assignee = assigneeOf(gpu);
       r.jobs.forEach((job, ji) => {
         anyJob = true;
         const y = r.y + rowPad + r.lane[ji] * (barH + laneGap);
@@ -370,12 +1062,12 @@
         const e = endOf(job);
         const x1 = x(s), w = Math.max(2, x(e) - x1);
         const cls = colourClass(job.user);
-        const outside = isOutside(job.user, assignee);
+        const outside = onSomeoneElsesBooking(job.user, gpu, s, e);
         if (job.user === null) anyUnatt = true; else usersSeen.add(job.user);
         if (outside) anyOutside = true;
         const g = svg("g");
         const rect = svg("rect", { x: x1, y: y, width: w, height: barH, rx: 3 },
-          "job " + cls + (outside ? " outside" : ""));
+          "job " + cls + (outside ? " unbooked" : ""));
         g.appendChild(rect);
         if (job.ongoing && !stale) {
           const tipX = x1 + w;
@@ -397,7 +1089,8 @@
         addTitle(g, [
           job.user === null ? "unattributed" : job.user,
           "what: " + (job.name || "unknown"),
-          "pid " + job.pid + " on GPU " + gpu + (outside ? " — outside allocation (assigned to " + assignee + ")" : ""),
+          "pid " + job.pid + " on GPU " + gpu
+            + (outside ? " — no booking of theirs while someone else's booking was active" : ""),
           fmtLocal(new Date(job.start)) + " – " + endTxt,
           "duration " + fmtDuration((e - s) / 1000),
           "peak VRAM " + fmtGiB(job.max_mib) + " (" + job.max_mib.toLocaleString() + " MiB)",
@@ -422,7 +1115,13 @@
       legend.appendChild(item);
     }
     if (anyOutside) {
-      const item = el("span", "item"); item.appendChild(el("span", "outside-key")); item.appendChild(el("span", "", "outside allocation"));
+      const item = el("span", "item"); item.appendChild(el("span", "outside-key"));
+      item.appendChild(el("span", "", "ran without a booking during someone else's booking"));
+      legend.appendChild(item);
+    }
+    if (anyBand) {
+      const item = el("span", "item"); item.appendChild(el("span", "band-key"));
+      item.appendChild(el("span", "", "faint band = booking"));
       legend.appendChild(item);
     }
     const tz = el("span", "item", "times in local time · ▸ = still running");
@@ -606,7 +1305,7 @@
     if (state.timelineTimer) clearInterval(state.timelineTimer);
     const every = state.timelineHours <= 24 ? 60000 : 300000;
     state.timelineTimer = setInterval(loadTimeline, every);
-    $("refresh-indicator").title = "auto-refresh: live every 30 s, timeline every "
+    $("refresh-indicator").title = "auto-refresh: live every 30 s, bookings every 1 min, timeline every "
       + (every / 60000) + " min, usage and last 24 h every 5 min";
   }
   function bindButtons(groupId, attr, onPick) {
@@ -630,11 +1329,14 @@
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => { renderTimeline(); renderUsage(); }, 150);
+    resizeTimer = setTimeout(() => { renderTimeline(); renderUsage(); if (state.claims) renderCalendar(); }, 150);
   });
 
-  loadNow().then(() => { loadTimeline(); loadUsage(); loadTimeseries(); });
+  bindBookingForm();
+  loadBookUsers();
+  loadNow().then(() => { loadClaims(); loadTimeline(); loadUsage(); loadTimeseries(); });
   setInterval(loadNow, 30000);
+  setInterval(loadClaims, 60000);
   scheduleTimeline();
   setInterval(loadUsage, 300000);
   setInterval(loadTimeseries, 300000);

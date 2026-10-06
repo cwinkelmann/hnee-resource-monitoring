@@ -8,6 +8,7 @@ import sqlite3
 import time
 from pathlib import Path
 
+from resourcemonitor.claims import DEFAULT_CLAIMS, load_active
 from resourcemonitor.energy import EnergyLedger, format_report
 from resourcemonitor.history import HistoryWriter
 from resourcemonitor.model import Snapshot
@@ -15,7 +16,7 @@ from resourcemonitor.notify import Notifier
 from resourcemonitor.paths import DEFAULT_ENERGY, DEFAULT_HISTORY, DEFAULT_POLICY, DEFAULT_STATE
 from resourcemonitor.policy import load_policy
 from resourcemonitor.probe import probe
-from resourcemonitor.rules import (Alert, IdleTracker, check_allocation, check_capacity,
+from resourcemonitor.rules import (Alert, IdleTracker, check_bookings, check_capacity,
                                     check_unattributed)
 from resourcemonitor.state import State
 
@@ -31,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--energy", type=Path, default=DEFAULT_ENERGY)
     p.add_argument("--price", type=float, default=0.30,
                    help="EUR per kWh, used only to annotate the report")
+    p.add_argument("--claims", type=Path, default=DEFAULT_CLAIMS,
+                   help="GPU bookings database (read-only here)")
     p.add_argument("--history", type=Path, default=DEFAULT_HISTORY,
                    help="SQLite history file (watch only)")
     p.add_argument("--bind", default="127.0.0.1", help="serve: address to listen on")
@@ -44,12 +47,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
-             history=None) -> int:
+             history=None, claims_path=None) -> int:
     snap = probe()
     dt_s, rows = ledger.accumulate(snap)   # before the rules: a poll always costs energy
     ledger.save(energy_path)
-    alerts = check_allocation(snap, pol) + check_capacity(snap, pol) \
-        + check_unattributed(snap, pol) \
+    # load_active is fail-open: a broken claims DB means no bookings, never a skipped rule
+    bookings = load_active(claims_path, snap.taken_at) if claims_path else []
+    alerts = check_bookings(snap, pol, bookings) + check_capacity(snap, pol) \
+        + check_unattributed(snap, pol, bookings) \
         + tracker.observe(snap, pol)
     fresh = [a for a in alerts if state.should_send(a.key, snap.taken_at, pol.cooldown_s)]
     delivered = notifier.send(fresh, host) if fresh else False
@@ -73,7 +78,8 @@ def main(argv=None) -> int:
         from resourcemonitor import web
         return web.main(["--bind", args.bind, "--port", str(args.port),
                          "--history", str(args.history), "--policy", str(args.policy),
-                         "--stale-after", str(args.stale_after)])
+                         "--stale-after", str(args.stale_after),
+                         "--claims", str(args.claims)])
     pol = load_policy(args.policy)
     state = State.load(args.state)
     url = os.environ.get("SLACK_WEBHOOK_URL", "")
@@ -97,7 +103,8 @@ def main(argv=None) -> int:
         return 0
 
     if args.mode == "once":
-        run_once(pol, state, notifier, tracker, ledger, host, args.energy)
+        run_once(pol, state, notifier, tracker, ledger, host, args.energy,
+                 claims_path=args.claims)
         return 0
 
     history = None                   # watch only: once/report never write history
@@ -111,7 +118,7 @@ def main(argv=None) -> int:
     while True:                      # watch
         try:
             run_once(pol, state, notifier, tracker, ledger, host, args.energy,
-                     history=history)
+                     history=history, claims_path=args.claims)
         except Exception as e:       # a bad poll must not end the service
             # class name only: the message may embed the webhook URL
             print(f"poll failed: {e.__class__.__name__}", flush=True)
