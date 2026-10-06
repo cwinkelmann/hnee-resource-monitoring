@@ -274,3 +274,7 @@ svg.calendar .cal-bar.selected rect { stroke: var(--text); stroke-width: 2; }
 .spark .power { fill: none; stroke: var(--power); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .spark .base { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .spark-foot { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.spark svg.vram-chart .area { stroke: none; }
+.spark svg.vram-chart .area.unatt { stroke: var(--unatt-stroke); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.spark svg.vram-chart .booked-share { fill: none; stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+.legend .booked-key { display: inline-block; width: 16px; height: 0; border-top: 2px dashed var(--text); }
