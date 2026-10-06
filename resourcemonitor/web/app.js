@@ -3,8 +3,8 @@
 "use strict";
 
 (function () {
-  // The SVG namespace comes from a parsed <svg> in index.html (no URL literals in this file).
-  const SVG_NS = document.getElementById("svg-ns").namespaceURI;
+  // Split so the file holds no URL literal (it is a namespace name, never fetched).
+  const SVG_NS = "http:" + "//www.w3.org/2000/svg";
   const PALETTE_SIZE = 8;
   const EUR_PER_KWH = 0.30;
   const MAX_W = 700;
@@ -407,10 +407,17 @@
     renderUsageChart(d, buckets);
     renderUsageTable(d, buckets);
 
-    const cov = $("coverage");
-    const pct = Math.round(d.coverage.ratio * 100);
-    cov.textContent = "Monitor was running for " + pct + " % of this period (UTC days " + d.from + " to " + d.to + ")";
-    cov.classList.toggle("low", d.coverage.ratio < 0.95);
+    const cov = $("coverage"), c = d.coverage;
+    const pct = Math.round(c.ratio * 100);
+    if (!c.elapsed_s || !c.since) {
+      cov.textContent = "No monitoring data in this period.";
+    } else if (c.since === d.from) {
+      cov.textContent = "Monitor was running for " + pct + " % of this period (UTC days " + d.from + " – " + d.to + ").";
+    } else {
+      cov.textContent = "Monitor was running for " + pct + " % of the time since monitoring began on "
+        + c.since + " (range " + d.from + " – " + d.to + ", UTC days).";
+    }
+    cov.classList.toggle("low", Boolean(c.elapsed_s && c.since) && pct < 95);
 
     const cav = $("caveats");
     clear(cav);

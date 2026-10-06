@@ -79,16 +79,20 @@ def usage(conn: sqlite3.Connection, start: date, end: date, by: str, now: dateti
         "SELECT COALESCE(SUM(dt_s), 0), MIN(ts) FROM polls WHERE ts >= ? AND ts < ?",
         (lo, hi)).fetchone()
     elapsed_s = 0.0
+    since = None          # UTC date coverage is measured from: max(range start, first poll)
     first_any = conn.execute("SELECT MIN(ts) FROM polls").fetchone()[0]
     if first_any is not None:
         t0 = max(datetime.combine(start, datetime.min.time(), timezone.utc),
                  datetime.fromisoformat(first_any))
         t1 = min(datetime.combine(end + timedelta(days=1), datetime.min.time(), timezone.utc), now)
         elapsed_s = max(0.0, (t1 - t0).total_seconds())
+        if elapsed_s:
+            since = t0.astimezone(timezone.utc).date().isoformat()
     ratio = monitored_s / elapsed_s if elapsed_s else 0.0
     return {"from": start.isoformat(), "to": end.isoformat(), "by": by,
             "periods": list(periods.values()), "totals": totals,
-            "coverage": {"monitored_s": float(monitored_s), "elapsed_s": elapsed_s, "ratio": ratio},
+            "coverage": {"monitored_s": float(monitored_s), "elapsed_s": elapsed_s, "ratio": ratio,
+                         "since": since},
             "caveats": list(CAVEATS)}
 
 

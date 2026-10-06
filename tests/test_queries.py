@@ -67,6 +67,17 @@ def test_usage_coverage_reflects_the_gap(db):
     assert 0.80 < u["coverage"]["ratio"] < 0.92               # 6 h of 48 missing, nothing invented
 
 
+def test_usage_coverage_says_since_when_it_is_measured(db):
+    now = T0 + timedelta(hours=48)
+    inside = usage(open_ro(db), date(2026, 10, 6), date(2026, 10, 6), "day", now=now)
+    assert inside["coverage"]["since"] == "2026-10-06"         # range starts after first poll
+    wide = usage(open_ro(db), date(2026, 9, 7), date(2026, 10, 6), "day", now=now)
+    assert wide["coverage"]["since"] == "2026-10-05"           # monitoring began mid-range
+    for lo, hi in ((date(2026, 9, 1), date(2026, 9, 2)), (date(2026, 10, 10), date(2026, 10, 11))):
+        empty = usage(open_ro(db), lo, hi, "day", now=now)
+        assert empty["coverage"]["elapsed_s"] == 0 and empty["coverage"]["since"] is None
+
+
 def test_usage_by_week_merges_days(db):
     u = usage(open_ro(db), date(2026, 10, 5), date(2026, 10, 6), "week",
               now=T0 + timedelta(hours=48))
