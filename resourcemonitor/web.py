@@ -347,15 +347,20 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "age_s": data["age_s"]})
 
     def _claims(self, query: str) -> None:
-        p = _params(query, {"days"})
-        days = 14
-        if "days" in p:
-            d = p["days"]
-            if len(d) > 2 or not (d.isascii() and d.isdigit()) or not 1 <= int(d) <= 14:
-                raise BadRequest("days")
-            days = int(p["days"])
+        p = _params(query, {"days", "back"})
+
+        def small_int(name: str, default: int, hi: int) -> int:
+            if name not in p:
+                return default
+            v = p[name]
+            if len(v) > 2 or not (v.isascii() and v.isdigit()) or not 1 <= int(v) <= hi:
+                raise BadRequest(name)
+            return int(v)
+
+        days = small_int("days", 14, 14)      # days ahead
+        back = small_int("back", 7, 30)       # days back (the timeline's 30 d view needs 30)
         now = self.server.clock()
-        claims = list_window_ro(self.server.claims_path, now, days_ahead=days, days_back=7)
+        claims = list_window_ro(self.server.claims_path, now, days_ahead=days, days_back=back)
         self._json(200, {"now": now.isoformat(), "claims": [b.to_json() for b in claims]})
 
     def _users(self, query: str) -> None:

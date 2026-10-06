@@ -49,7 +49,7 @@ if (typeof document !== "undefined") (function () {
     timelineSeq: 0, usageSeq: 0,
     timelineTimer: null,
     claims: null,            // GET /api/claims: the calendar, the form and recent changes
-    timelineClaims: [],      // GET /api/claims?days=1: bands behind the timeline
+    timelineClaims: [],      // GET /api/claims?days=1&back=N: bands behind the timeline
     bookUsers: null,         // GET /api/users: who may book
     selectedClaim: null,     // id shown in the details panel
     cancelArmed: null,       // id whose "Cancel booking?" step is showing
@@ -264,7 +264,9 @@ if (typeof document !== "undefined") (function () {
     const seq = ++state.timelineSeq;
     const [data, claims] = await Promise.all([
       getJson("timeline", "/api/timeline?hours=" + state.timelineHours),
-      getJson("timeline-claims", "/api/claims?days=1"),
+      // bookings for the whole visible range (+1 day of margin), capped by the server at 30 days back
+      getJson("timeline-claims", "/api/claims?days=1&back="
+        + Math.min(30, Math.ceil(state.timelineHours / 24) + 1)),
     ]);
     if (!data || seq !== state.timelineSeq) return;
     state.timeline = data;
@@ -304,7 +306,10 @@ if (typeof document !== "undefined") (function () {
   function errorText(res) {
     if (res.status === 0) return "Couldn't reach the server — nothing was booked or cancelled.";
     const b = res.body || {};
-    return b.detail || b.error || "HTTP " + res.status;   // the server's detail, verbatim
+    if (b.detail) return b.detail;                        // the server's detail, verbatim
+    if (res.status === 429) return "Too many bookings from this computer in the last hour — try again later.";
+    if (res.status === 403) return "This request was refused (cross-site check).";
+    return b.error || "HTTP " + res.status;
   }
   async function loadUsage() {
     const seq = ++state.usageSeq;

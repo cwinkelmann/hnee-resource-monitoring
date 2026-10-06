@@ -102,7 +102,9 @@ def test_api_claims_lists_bookings_and_users_lists_the_directory(live):
 
 @pytest.mark.parametrize("q", ["/api/claims?days=15", "/api/claims?days=0", "/api/claims?days=x",
                                "/api/claims?days=-1", "/api/claims?days=" + "9" * 5000,
-                               "/api/claims?days=014", "/api/claims?foo=1", "/api/users?x=1"])
+                               "/api/claims?days=014", "/api/claims?foo=1", "/api/users?x=1",
+                               "/api/claims?back=0", "/api/claims?back=31", "/api/claims?back=abc",
+                               "/api/claims?back=999", "/api/claims?back=-1", "/api/claims?back="])
 def test_claims_and_users_bad_params_are_400(live, q):
     status, headers, body = _get(live + q)
     assert status == 400 and json.loads(body) == {"error": "bad request"}
@@ -294,3 +296,23 @@ def test_query_slots_are_a_bounded_semaphore_of_two():
     from resourcemonitor import web
     assert isinstance(web._QUERY_SLOTS, type(threading.BoundedSemaphore(2)))
     assert web._QUERY_SLOTS._initial_value == 2
+
+
+def test_api_claims_back_reaches_further_into_the_past_than_the_default_week(tmp_path):
+    srv, base = _serve(tmp_path, seed=True)
+    try:
+        then = NOW - timedelta(days=20)
+        store = ClaimsStore(tmp_path / "claims.sqlite", users=FakeUsers())
+        book(store, user="andre.kliem", gpu=2, gib=30, start=then, hours=6, now=then)
+        store.close()
+        users = lambda q: [c["user"] for c in json.loads(_get(base + "/api/claims" + q)[2])["claims"]]
+        assert users("") == ["cwinkelmann"]                      # default: 7 days back
+        assert users("?days=1") == ["cwinkelmann"]
+        assert users("?back=30") == ["andre.kliem", "cwinkelmann"]
+        assert users("?days=1&back=30") == ["andre.kliem", "cwinkelmann"]
+        assert users("?back=19") == ["cwinkelmann"]
+        status, headers, _ = _get(base + "/api/claims?days=1&back=30")
+        assert status == 200
+        _assert_headers(headers)
+    finally:
+        srv.shutdown()
