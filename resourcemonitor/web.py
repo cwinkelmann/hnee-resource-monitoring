@@ -236,7 +236,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": "internal"})
 
     def _drain(self) -> None:
-        """Swallow up to 64 KiB of an unread body (1 s at most), then close after replying.
+        """Swallow up to 64 KiB of an unread body (1 s in total), then close after replying.
         Closing a socket with unread input sends a TCP reset, which can make the client
         lose the response it was about to read."""
         self.close_connection = True
@@ -244,9 +244,13 @@ class _Handler(BaseHTTPRequestHandler):
         if not (length.isascii() and length.isdigit()) or len(length) > 12:
             return
         remaining = min(int(length), _DRAIN_MAX)
+        deadline = time.monotonic() + _DRAIN_TIMEOUT_S   # total, not per read: no slow-loris
         try:
-            self.connection.settimeout(_DRAIN_TIMEOUT_S)
             while remaining > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                self.connection.settimeout(max(left, 0.01))
                 chunk = self.rfile.read1(remaining)
                 if not chunk:
                     break

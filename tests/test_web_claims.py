@@ -195,6 +195,39 @@ def test_rejected_writes_reply_without_a_connection_reset(live, kw, status):
     assert head.split(b" ")[1] == str(status).encode() and body.endswith(b"}")
 
 
+def test_drain_stops_after_one_second_against_a_dribbling_client(live):
+    import socket
+    import time
+    from urllib.parse import urlsplit
+    u = urlsplit(live)
+    s = socket.create_connection((u.hostname, u.port), timeout=5)
+    s.setblocking(False)
+    try:
+        s.sendall((f"POST /api/claims HTTP/1.1\r\nHost: {u.netloc}\r\n"
+                   "Content-Type: text/plain\r\nContent-Length: 65536\r\n\r\n").encode())
+        t0 = time.monotonic()
+        out = b""
+        while time.monotonic() - t0 < 4:
+            try:
+                s.send(b" ")                    # one byte every 0.3 s, never the whole body
+            except OSError:
+                break
+            time.sleep(0.3)
+            try:
+                chunk = s.recv(65536)
+            except BlockingIOError:
+                continue
+            except OSError:
+                break
+            out += chunk
+            if not chunk or out.endswith(b"}"):
+                break
+        elapsed = time.monotonic() - t0
+    finally:
+        s.close()
+    assert elapsed < 2.0 and out.startswith(b"HTTP/1.0 415 ")
+
+
 def test_missing_content_length_is_413(live):
     import http.client
     from urllib.parse import urlsplit
