@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from resourcemonitor.claims import Booking
+from resourcemonitor.claims import Booking, allocate, takes_of
 from resourcemonitor.model import Snapshot
 from resourcemonitor.policy import Policy
 
 
 @dataclass(frozen=True)
 class Alert:
-    kind: str                 # "over_booking" | "booked_gpu" | "idle" | "capacity" | "unattributed" | "report"
+    kind: str                 # "over_booking" | "booked_gpu" | "taken" | "idle" | "capacity" | "unattributed" | "report"
     key: str                  # incident identity; stable across polls
     text: str
     gpu_index: int | None = None
@@ -33,26 +34,35 @@ def check_bookings(snap: Snapshot, pol: Policy, bookings: list[Booking]) -> list
     """Over-use of a booked share, and non-bookers crowding a booked card.
 
     A GPU without an active booking is free. Several processes of one user on one
-    GPU are one incident, so their VRAM is summed.
+    GPU are one incident, so their VRAM is summed. Shares are effective ones: a lendable
+    booking squeezed by an important booking counts only what allocate() leaves it.
     """
     out: list[Alert] = []
     total = {g.index: g.total_mib for g in snap.gpus}
     for gpu, active in _active(bookings, snap).items():
+        eff = allocate(active, total[gpu]) if gpu in total else {b.id: b.vram_mib for b in active}
         booked_by_user: dict[str, int] = {}
+        share_by_user: dict[str, int] = {}
         for b in active:
             booked_by_user[b.user] = booked_by_user.get(b.user, 0) + b.vram_mib
-        booked = sum(booked_by_user.values())
+            share_by_user[b.user] = share_by_user.get(b.user, 0) + eff[b.id]
+        booked = sum(share_by_user.values())
         use: dict[str, int] = {}               # insertion order = first process seen
         for p in snap.procs:
             if p.gpu_index == gpu and p.user is not None:   # unattributed: never accuse
                 use[p.user] = use.get(p.user, 0) + p.used_mib
         for user, mib in use.items():
-            if user in booked_by_user and mib * 10 > booked_by_user[user] * 11:
-                out.append(Alert(
-                    kind="over_booking", key=f"booking:over:{user}:{gpu}",
-                    gpu_index=gpu, user=user,
-                    text=(f"{user} uses {_mib(mib)} on GPU {gpu} "
-                          f"but booked {_mib(booked_by_user[user])}.")))
+            if user in share_by_user and mib * 10 > share_by_user[user] * 11:
+                share, asked = share_by_user[user], booked_by_user[user]
+                if share < asked:
+                    takers = sorted({b.user for b in active if b.priority == "important"})
+                    text = (f"{user} uses {_mib(mib)} on GPU {gpu}; {user}'s lendable booking "
+                            f"was reduced from {_mib(asked)} to {_mib(share)} by "
+                            f"{', '.join(takers)}'s important booking.")
+                else:
+                    text = f"{user} uses {_mib(mib)} on GPU {gpu} but booked {_mib(asked)}."
+                out.append(Alert(kind="over_booking", key=f"booking:over:{user}:{gpu}",
+                                 gpu_index=gpu, user=user, text=text))
         others = {u: m for u, m in use.items() if u not in booked_by_user}
         remainder = max(total.get(gpu, 0) - booked, 0)
         if sum(others.values()) > remainder:
@@ -64,6 +74,31 @@ def check_bookings(snap: Snapshot, pol: Policy, bookings: list[Booking]) -> list
                     text=(f"{user} is using {_mib(mib)} on GPU {gpu}; {_mib(booked)} is "
                           f"booked by {', '.join(sorted(booked_by_user))} until "
                           f"{earliest_end:%a %H:%M} UTC, {_mib(remainder)} unbooked.")))
+    return out
+
+
+def check_takes(now: datetime, bookings: list[Booking], totals: dict[int, int]) -> list[Alert]:
+    """A heads-up to the holder of a lendable booking that an important booking takes part of
+    it, from the moment the important booking exists (so during its grace period) until the
+    take ends. One alert per (important, lendable) pair; the key is made of two row ids, so
+    the cooldown store deduplicates it. `bookings` are uncancelled rows from now onwards."""
+    out: list[Alert] = []
+    live = [b for b in bookings if b.cancelled_at is None and b.end > now]
+    for imp in sorted((b for b in live if b.priority == "important"), key=lambda b: b.id):
+        if imp.gpu not in totals:
+            continue
+        per: dict[int, list[dict]] = {}
+        for t in takes_of(imp, live, totals[imp.gpu]):
+            if t["end"] > now:
+                per.setdefault(t["id"], []).append(t)
+        for lend_id, segs in per.items():
+            first, last = segs[0], segs[-1]
+            out.append(Alert(
+                kind="taken", key=f"booking:taken:{imp.id}:{lend_id}",
+                gpu_index=imp.gpu, user=first["user"],
+                text=(f"{imp.user} takes {_mib(max(s['vram_mib'] for s in segs))} of "
+                      f"{first['user']}'s lendable booking on GPU {imp.gpu} from "
+                      f"{max(first['start'], now):%a %H:%M} until {last['end']:%a %H:%M} UTC.")))
     return out
 
 

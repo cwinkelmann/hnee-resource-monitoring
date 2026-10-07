@@ -8,6 +8,7 @@ import urllib.request
 from resourcemonitor.rules import Alert
 
 ICON = {"booked_gpu": ":no_entry_sign:", "over_booking": ":chart_with_upwards_trend:",
+        "taken": ":scissors:",
         "idle": ":zzz:", "capacity": ":rotating_light:",
         "unattributed": ":grey_question:", "report": ":zap:"}
 

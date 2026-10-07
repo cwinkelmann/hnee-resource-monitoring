@@ -485,3 +485,60 @@ def test_whole_card_booking_uses_the_latest_poll_total(tmp_path, monkeypatch):
 def test_huge_gpu_number_is_a_400_not_a_500(live, route, payload):
     s, _, body = _post(live + route, payload)
     assert (s, json.loads(body)) == (400, {"error": "invalid", "detail": "GPU must be 0–7"})
+
+
+# --- lendable vs important ---------------------------------------------------------------
+
+def _get(url):
+    with urllib.request.urlopen(url, timeout=5) as r:
+        return json.loads(r.read())
+
+
+def test_priority_defaults_to_lendable_and_rejects_other_values(live):
+    s, _, body = _post(live + "/api/claims", _booking())
+    assert s == 201 and json.loads(body)["claim"]["priority"] == "lendable"
+    assert json.loads(body)["takes"] == [] and json.loads(body)["adjusted_start"] is None
+    for bad in ("urgent", 1, None):
+        s, _, body = _post(live + "/api/claims", _booking(priority=bad, gpu=5))
+        assert (s, json.loads(body)["detail"]) == (400, "priority must be lendable or important")
+
+
+def test_important_over_a_running_lendable_is_moved_and_reports_the_take(live):
+    s, _, body = _post(live + "/api/claims", _booking(vram_gib=70))
+    lend = json.loads(body)["claim"]
+    s, _, body = _post(live + "/api/claims", _booking(user="cwinkelmann", vram_gib=40,
+                                                       priority="important"))
+    r = json.loads(body)
+    assert s == 201 and r["claim"]["priority"] == "important"
+    assert r["adjusted_start"] == "2026-10-06T12:00:00+00:00"
+    assert r["claim"]["start"] == "2026-10-06T12:30:00+00:00"
+    (t,) = r["takes"]
+    assert (t["id"], t["user"], t["start"], t["end"]) == (
+        lend["id"], "dorian.zwanzig", "2026-10-06T12:30:00+00:00", "2026-10-06T16:00:00+00:00")
+    assert t["vram_gib"] == round(t["vram_mib"] / 1024, 1) and t["vram_mib"] > 0
+
+    listing = _get(live + "/api/claims")
+    assert listing["grace_minutes"] == 30
+    got = {c["id"]: c for c in listing["claims"]}
+    (seg,) = got[lend["id"]]["taken"]
+    assert seg["by"] == ["cwinkelmann"] and seg["vram_mib"] == t["vram_mib"]
+    assert got[r["claim"]["id"]]["taken"] == []
+
+
+def test_important_conflict_names_the_kind_of_shortfall(live):
+    _post(live + "/api/claims", _booking(vram_gib=60, priority="important"))
+    s, _, body = _post(live + "/api/claims", _booking(user="cwinkelmann", vram_gib=60,
+                                                       priority="important"))
+    assert s == 409 and "not booked as important" in json.loads(body)["detail"]
+
+
+def test_now_reports_effective_shares_and_taken_segments(live):
+    _post(live + "/api/claims", _booking(vram_gib=70))
+    _post(live + "/api/claims", _booking(user="cwinkelmann", vram_gib=40, priority="important",
+                                         start="2026-10-06T15:00:00+02:00"))
+    gpu = next(g for g in _get(live + "/api/now")["gpus"] if g["gpu"] == 4)
+    (b,) = gpu["bookings"]                       # the important one has not started yet
+    assert b["priority"] == "lendable" and b["effective_mib"] == 70 * 1024
+    assert gpu["booked_mib"] == 70 * 1024
+    (seg,) = b["taken"]
+    assert seg["start"] == "2026-10-06T13:00:00+00:00" and seg["by"] == ["cwinkelmann"]

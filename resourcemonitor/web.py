@@ -19,12 +19,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from resourcemonitor.claims import (DEFAULT_CARD_MIB, DEFAULT_CLAIMS, GPU_COUNT, MIB_PER_GIB,
-                                    ClaimError, ClaimsStore, PwdUsers, UserDirectory,
-                                    list_window_ro, load_active, parse_time)
+from resourcemonitor.claims import (DEFAULT_CARD_MIB, DEFAULT_CLAIMS, DEFAULT_GRACE, GPU_COUNT,
+                                    MIB_PER_GIB, ClaimError, ClaimsStore, PwdUsers,
+                                    UserDirectory, list_window_ro, load_active, parse_time,
+                                    taken_segments)
 from resourcemonitor.paths import DEFAULT_HISTORY, DEFAULT_POLICY
-from resourcemonitor.queries import (NoHistory, latest, open_ro, timeline, timeseries, usage,
-                                     vram_timeseries)
+from resourcemonitor.policy import load_policy
+from resourcemonitor.queries import (NoHistory, _seg_json, latest, open_ro, timeline,
+                                     timeseries, usage, vram_timeseries)
 
 WEB_DIR = Path(__file__).parent / "web"
 STATIC = {
@@ -46,7 +48,7 @@ _DRAIN_TIMEOUT_S = 1
 _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
                                  "/api/vram", "/api/timeline", "/api/users", "/healthz"}
-_CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note")
+_CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note", "priority")
 _QUICK = "/api/claims/quick"
 _QUICK_FIELDS = ("user", "gpu")
 _CLAIM_ERRORS = {400: "invalid", 404: "not found", 409: "conflict"}
@@ -228,8 +230,15 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(201, {"claim": claim.to_json()})
             elif m is None:
-                claim = self._create(body)
-                self._json(201, {"claim": claim.to_json()})
+                made = self._create(body)
+                self._json(201, {
+                    "claim": made.booking.to_json(),
+                    "takes": [{**t, "start": t["start"].isoformat(),
+                               "end": t["end"].isoformat(),
+                               "vram_gib": round(t["vram_mib"] / MIB_PER_GIB, 1)}
+                              for t in made.takes],
+                    "adjusted_start": None if made.adjusted_start is None
+                    else made.adjusted_start.isoformat()})
             else:
                 if body:
                     raise ClaimError(400, "unknown field")
@@ -308,12 +317,23 @@ class _Handler(BaseHTTPRequestHandler):
         note = d.get("note")
         if note is not None and not isinstance(note, str):
             raise ClaimError(400, "missing or invalid field 'note'")
+        priority = d.get("priority", "lendable")
+        if not isinstance(priority, str):
+            raise ClaimError(400, "priority must be lendable or important")
         card_mib = self._card_mib(gpu)
         vram_mib = card_mib if vram_gib is None else round(vram_gib * MIB_PER_GIB)
         return self._store().create(user=user, gpu=gpu, vram_mib=vram_mib,
                                     start=start, end=end, note=note,
                                     ip=self.client_address[0], now=self.server.clock(),
-                                    card_mib=card_mib)
+                                    card_mib=card_mib, priority=priority,
+                                    grace=self._grace())
+
+    def _grace(self) -> timedelta:
+        """booking.grace_minutes from policy.toml; the default if the file is missing or bad."""
+        try:
+            return timedelta(minutes=load_policy(self.server.policy_path).grace_minutes)
+        except Exception:
+            return DEFAULT_GRACE
 
     def _quick(self, d: dict):
         if set(d) - set(_QUICK_FIELDS):
@@ -354,9 +374,11 @@ class _Handler(BaseHTTPRequestHandler):
         _params(query, set())
         now = self.server.clock()
         bookings = load_active(self.server.claims_path, now)
+        upcoming = [b for b in list_window_ro(self.server.claims_path, now, days_back=0)
+                    if b.cancelled_at is None]
         conn = self._conn()
         try:
-            data = latest(conn, bookings, now, self.server.stale_after_s)
+            data = latest(conn, bookings, now, self.server.stale_after_s, upcoming)
         finally:
             conn.close()
         self._json(200, data)
@@ -385,7 +407,17 @@ class _Handler(BaseHTTPRequestHandler):
         back = small_int("back", 7, 30)       # days back (the timeline's 30 d view needs 30)
         now = self.server.clock()
         claims = list_window_ro(self.server.claims_path, now, days_ahead=days, days_back=back)
-        self._json(200, {"now": now.isoformat(), "claims": [b.to_json() for b in claims]})
+        lo, hi = now - timedelta(days=back), now + timedelta(days=days)
+        totals = {g: self._card_mib(g) for g in {b.gpu for b in claims}}
+        out = []
+        for b in claims:
+            d = b.to_json()
+            d["taken"] = [_seg_json(s) for s in
+                          taken_segments(b, claims, totals[b.gpu], lo, hi)]
+            out.append(d)
+        self._json(200, {"now": now.isoformat(),
+                         "grace_minutes": int(self._grace().total_seconds() // 60),
+                         "claims": out})
 
     def _users(self, query: str) -> None:
         _params(query, set())

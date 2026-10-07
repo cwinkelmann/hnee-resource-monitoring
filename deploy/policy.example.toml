@@ -18,3 +18,8 @@ capacity_free_mib = 40960
 [notify]
 cooldown_s = 3600           # one message per incident per hour, not per poll
 channel    = "#gpu-watch"
+
+[booking]
+# An important booking that would squeeze a lendable booking already under way starts
+# no earlier than this many minutes from when it is made.
+grace_minutes = 30

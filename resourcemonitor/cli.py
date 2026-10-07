@@ -8,7 +8,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from resourcemonitor.claims import DEFAULT_CLAIMS, load_active
+from resourcemonitor.claims import DEFAULT_CLAIMS, list_window_ro, load_active
 from resourcemonitor.energy import EnergyLedger, format_report
 from resourcemonitor.history import HistoryWriter
 from resourcemonitor.model import Snapshot
@@ -16,7 +16,7 @@ from resourcemonitor.notify import Notifier
 from resourcemonitor.paths import DEFAULT_ENERGY, DEFAULT_HISTORY, DEFAULT_POLICY, DEFAULT_STATE
 from resourcemonitor.policy import load_policy
 from resourcemonitor.probe import probe
-from resourcemonitor.rules import (Alert, IdleTracker, check_bookings, check_capacity,
+from resourcemonitor.rules import (Alert, IdleTracker, check_bookings, check_capacity, check_takes,
                                     check_unattributed)
 from resourcemonitor.state import State
 
@@ -53,7 +53,10 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
     ledger.save(energy_path)
     # load_active is fail-open: a broken claims DB means no bookings, never a skipped rule
     bookings = load_active(claims_path, snap.taken_at) if claims_path else []
+    upcoming = list_window_ro(claims_path, snap.taken_at, days_back=0) if claims_path else []
+    totals = {g.index: g.total_mib for g in snap.gpus}
     alerts = check_bookings(snap, pol, bookings) + check_capacity(snap, pol) \
+        + check_takes(snap.taken_at, upcoming, totals) \
         + check_unattributed(snap, pol, bookings) \
         + tracker.observe(snap, pol)
     fresh = [a for a in alerts if state.should_send(a.key, snap.taken_at, pol.cooldown_s)]
