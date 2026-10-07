@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>carrot GPUs</title>
+<title>GPUs</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <header class="topbar">
-  <h1>carrot GPUs</h1>
+  <h1 id="page-title">GPUs</h1>
   <div class="status">
     <span id="last-poll" class="muted">loading…</span>
     <span id="refresh-indicator" class="refresh" title="auto-refresh: live every 30 s">auto-refresh</span>
@@ -54,6 +54,9 @@
           <input id="book-until" name="end" type="datetime-local" step="60" aria-label="until (custom)" hidden>
           <span id="book-until-text" class="muted"></span>
         </div>
+        <span class="label">priority</span>
+        <label class="check" for="book-important"><input id="book-important" name="important" type="checkbox"> Important</label>
+        <p id="book-priority-hint" class="hint priority-hint">Others can't take an important booking. A lendable one can be partly taken by an important booking, with 30 minutes' notice.</p>
         <label for="book-note">note</label>
         <input id="book-note" name="note" type="text" maxlength="120" placeholder="optional, e.g. fine-tuning run">
         <p id="book-preview" class="book-preview" aria-live="polite"></p>
@@ -62,7 +65,7 @@
         <p id="book-ok" class="book-ok" role="status" hidden></p>
       </form>
       <div class="booking-side">
-        <h3>Next 14 days <span class="hint">bar height = booked share of the card · click a bar for details</span></h3>
+        <h3>Next 14 days <span class="hint">bar height = booked share of the card · hatched = lendable, solid = important · click a bar for details</span></h3>
         <div id="booking-calendar" class="chart-wrap"></div>
         <div id="booking-detail" class="booking-detail" hidden></div>
       </div>

@@ -19,4 +19,4 @@ def book(store, user="dorian.zwanzig", gpu=4, gib=40, start=T0, hours=4, now=T0,
          note=None, card_mib=81559):
     return store.create(user=user, gpu=gpu, vram_mib=gib * 1024, start=start,
                         end=start + timedelta(hours=hours), note=note, ip=ip, now=now,
-                        card_mib=card_mib)
+                        card_mib=card_mib).booking

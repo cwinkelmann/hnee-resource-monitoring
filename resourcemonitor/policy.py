@@ -17,6 +17,7 @@ class Policy:
     capacity_free_mib: int
     cooldown_s: int
     channel: str
+    grace_minutes: int = 30        # notice an important booking gives a running lendable one
 
 
 def load_policy(path: Path | str) -> Policy:
@@ -38,6 +39,9 @@ def load_policy(path: Path | str) -> Policy:
         assignments[user] = frozenset(gpus)
 
     r, n = raw["rules"], raw["notify"]
+    grace = raw.get("booking", {}).get("grace_minutes", 30)
+    if not isinstance(grace, int) or isinstance(grace, bool) or not 0 <= grace <= 24 * 60:
+        raise ValueError("booking.grace_minutes must be a whole number of minutes, 0..1440")
     return Policy(
         assignments=assignments,
         idle_util_pct=int(r["idle_util_pct"]),
@@ -46,4 +50,5 @@ def load_policy(path: Path | str) -> Policy:
         capacity_free_mib=int(r["capacity_free_mib"]),
         cooldown_s=int(n["cooldown_s"]),
         channel=str(n["channel"]),
+        grace_minutes=grace,
     )

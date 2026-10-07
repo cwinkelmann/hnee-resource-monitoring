@@ -167,3 +167,33 @@ def test_vram_stacking_and_booked_share_helpers():
                          timeout=30)
     assert out.returncode == 0, out.stderr
     assert "ok" in out.stdout
+
+
+def test_allocation_rule_in_app_js_matches_the_shared_cases():
+    """allocate() in app.js runs the same fixture as claims.allocate; takesPreview builds on it."""
+    import shutil, subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    out = subprocess.run([node, "tests/js/test_allocate.mjs"], capture_output=True, text=True,
+                         timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert "ok" in out.stdout
+
+
+def test_booking_form_has_an_important_checkbox_off_by_default_and_posts_priority():
+    html = (WEB / "index.html").read_text()
+    tag = re.search(r'<input id="book-important"[^>]*>', html).group(0)
+    assert 'type="checkbox"' in tag and "checked" not in tag
+    assert 'id="book-priority-hint"' in html
+    js = (WEB / "app.js").read_text()
+    assert "payload.priority = formPriority()" in js
+    assert "data.grace_minutes" in js and "adjusted_start" in js and "res.body.takes" in js
+
+
+def test_page_shows_priority_and_taken_segments():
+    js = (WEB / "app.js").read_text()
+    assert "effective_mib" in js and "c.taken" in js and "b.taken" in js
+    assert 'taken: "' in js                                  # an icon for the "taken" alert kind
+    css = (WEB / "app.css").read_text()
+    assert "repeating-linear-gradient" in css and ".hatch-line" in css and "taken-cut" in css

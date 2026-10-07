@@ -6,10 +6,13 @@
 // Minimum free MiB on `gpu` over [startMs, endMs), counting only uncancelled claims on that
 // GPU (a claim is active from its start, inclusive, to its end, exclusive). The worst instant
 // is always the window start or the start of a claim inside the window.
-function freeVramMiB(claims, gpu, startMs, endMs, cardMiB) {
+// priority "important" counts only important claims (lendable capacity is free for an
+// important booking); anything else counts every claim, as a lendable booking must fit.
+function freeVramMiB(claims, gpu, startMs, endMs, cardMiB, priority) {
   const live = [];
   for (const c of claims) {
     if (c.gpu !== gpu || c.cancelled_at) continue;
+    if (priority === "important" && c.priority !== "important") continue;
     const s = Date.parse(c.start), e = Date.parse(c.end);
     if (s < endMs && e > startMs) live.push({ s: s, e: e, mib: c.vram_mib });
   }
@@ -20,6 +23,54 @@ function freeVramMiB(claims, gpu, startMs, endMs, cardMiB) {
     worst = Math.max(worst, sum);
   }
   return Math.max(0, cardMiB - worst);
+}
+
+// The allocation rule at one instant on one GPU (same as claims.allocate on the server):
+// important bookings get their full share; what is left of the card goes to lendable ones
+// oldest first (lowest id first), each min(its share, what is left), so the newest shrinks
+// first. bookings: [{id, vram_mib, priority}] (no priority = lendable). Returns {id: MiB}.
+function allocate(bookings, totalMib) {
+  const out = {};
+  let left = totalMib;
+  for (const b of bookings) {
+    if (b.priority === "important") { out[b.id] = b.vram_mib; left -= b.vram_mib; }
+  }
+  left = Math.max(0, left);
+  const lendable = bookings.filter((b) => b.priority !== "important").sort((a, b) => a.id - b.id);
+  for (const b of lendable) {
+    out[b.id] = Math.min(b.vram_mib, left);
+    left -= out[b.id];
+  }
+  return out;
+}
+
+// What a new important booking of vramMib on `gpu` over [startMs, endMs) would take from
+// lendable claims: [{id, user, mib (the most taken at any instant), from (ms, first instant
+// taken), start (the lendable claim's own start, ms)}], in order of `from`.
+function takesPreview(claims, gpu, startMs, endMs, vramMib, cardMiB) {
+  const live = [];
+  for (const c of claims) {
+    if (c.gpu !== gpu || c.cancelled_at) continue;
+    const s = Date.parse(c.start), e = Date.parse(c.end);
+    if (s < endMs && e > startMs) live.push({ c: c, s: s, e: e });
+  }
+  const times = new Set([startMs]);
+  for (const l of live) for (const t of [l.s, l.e]) if (t > startMs && t < endMs) times.add(t);
+  const found = new Map();                       // claim id -> take
+  for (const t of Array.from(times).sort((a, b) => a - b)) {
+    const active = live.filter((l) => l.s <= t && t < l.e).map((l) => l.c);
+    const before = allocate(active, cardMiB);
+    const after = allocate(active.concat([{ id: "new", vram_mib: vramMib, priority: "important" }]), cardMiB);
+    for (const c of active) {
+      if (c.priority === "important") continue;
+      const d = before[c.id] - after[c.id];
+      if (d <= 0) continue;
+      const f = found.get(c.id);
+      if (f) f.mib = Math.max(f.mib, d);
+      else found.set(c.id, { id: c.id, user: c.user, mib: d, from: t, start: Date.parse(c.start) });
+    }
+  }
+  return Array.from(found.values()).sort((a, b) => a.from - b.from || a.id - b.id);
 }
 
 // Per-key debounce: deliver(key, value) runs delayMs after the last push for that key, with
@@ -91,7 +142,9 @@ function bookedSteps(claims, gpu, t0, t1) {
   return steps;
 }
 if (typeof module !== "undefined") {
-  module.exports = { freeVramMiB, makeDebouncer, vramBucketOrder, stackSeries, bookedSteps };
+  module.exports = {
+    freeVramMiB, allocate, takesPreview, makeDebouncer, vramBucketOrder, stackSeries, bookedSteps,
+  };
 }
 
 // Start-up only in a browser: Node loads this file for the tests above.
@@ -103,6 +156,7 @@ if (typeof document !== "undefined") (function () {
   const MAX_W = 700;
   const ALERT_ICONS = {
     booked_gpu: "⚠", over_booking: "▲", idle: "◔", capacity: "▣", unattributed: "?", report: "Σ",
+    taken: "✂",
   };
   const RED_ALERTS = new Set(["booked_gpu", "over_booking"]);   // the only kinds that turn a card red
   const DEFAULT_CARD_MIB = 81559;                                // same fallback as the server
@@ -125,6 +179,7 @@ if (typeof document !== "undefined") (function () {
     timelineSeq: 0, usageSeq: 0,
     timelineTimer: null,
     claims: null,            // GET /api/claims: the calendar, the form and recent changes
+    graceMinutes: 30,        // GET /api/claims grace_minutes: notice before a lendable is taken
     timelineClaims: [],      // GET /api/claims?days=1&back=N: bands behind the timeline
     bookUsers: null,         // GET /api/users: who may book
     selectedClaim: null,     // id shown in the details panel
@@ -249,6 +304,19 @@ if (typeof document !== "undefined") (function () {
     const g = mib / 1024;
     return Number.isInteger(g) ? String(g) : g.toFixed(1);
   }
+  function priorityOf(c) { return c.priority === "important" ? "important" : "lendable"; }
+  function prioTag(c) {
+    const p = priorityOf(c);
+    const t = el("span", "prio " + p, p);
+    t.title = p === "important" ? "important: others can't take it"
+      : "lendable: an important booking can take part of it, with notice";
+    return t;
+  }
+  // One taken segment as text: "40 GiB taken by bob, Wed 15:30 – Thu 18:00".
+  function takenText(seg) {
+    return gibText(seg.vram_mib) + " GiB taken by " + (seg.by || []).join(", ")
+      + ", " + fmtWhen(new Date(seg.start)) + " – " + fmtWhen(new Date(seg.end));
+  }
   function sameDay(a, b) {
     return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   }
@@ -358,6 +426,7 @@ if (typeof document !== "undefined") (function () {
     const data = await getJson("claims", "/api/claims");
     if (!data) return;
     state.claims = data.claims;
+    if (typeof data.grace_minutes === "number") state.graceMinutes = data.grace_minutes;
     if (registerUsers(data.claims.map((c) => c.user))) renderAll(); else renderBookings();
   }
   async function loadBookUsers() {
@@ -424,6 +493,11 @@ if (typeof document !== "undefined") (function () {
   function renderNow() {
     const d = state.now;
     if (!d) return;
+    if (d.host) {                            // the box this server runs on, e.g. carrot or olive
+      const title = d.host + " GPUs";
+      $("page-title").textContent = title;
+      document.title = title;
+    }
     const polled = new Date(d.ts);
     const lp = $("last-poll");
     lp.textContent = "last poll " + fmtLocal(polled);
@@ -474,6 +548,21 @@ if (typeof document !== "undefined") (function () {
     }
   }
 
+  // A booking's share right now (older servers send no effective_mib: the booked share).
+  function effectiveMiB(b) { return typeof b.effective_mib === "number" ? b.effective_mib : b.vram_mib; }
+  // "alice 80 GiB until Fri 18:00", or when squeezed now
+  // "alice 40/80 GiB (40 taken by bob until Thu 18:00)".
+  function chipText(b) {
+    const eff = effectiveMiB(b);
+    if (eff >= b.vram_mib) return b.user + " " + gibText(b.vram_mib) + " GiB until " + fmtWhen(new Date(b.end));
+    const now = Date.now();
+    const seg = (b.taken || []).find((s) => Date.parse(s.start) <= now && Date.parse(s.end) > now)
+      || (b.taken || [])[0];
+    return b.user + " " + gibText(eff) + "/" + gibText(b.vram_mib) + " GiB ("
+      + gibText(b.vram_mib - eff) + " taken"
+      + (seg ? " by " + (seg.by || []).join(", ") + " until " + fmtWhen(new Date(seg.end)) : "") + ")";
+  }
+
   function gpuCard(g, red) {
     const card = el("div", "card" + (red ? " flagged" : ""));
     const head = el("div", "card-head");
@@ -488,9 +577,16 @@ if (typeof document !== "undefined") (function () {
     if (!g.bookings.length) booked.appendChild(el("li", "none", "not booked"));
     for (const b of g.bookings.slice(0, 2)) {
       const li = el("li");
-      li.appendChild(swatch(b.user));
-      li.appendChild(el("span", "", b.user + " " + gibText(b.vram_mib) + " GiB until " + fmtWhen(new Date(b.end))));
-      if (b.note) li.title = b.note;
+      const sw = swatch(b.user);
+      if (priorityOf(b) === "lendable") sw.classList.add("lendable");
+      li.appendChild(sw);
+      li.appendChild(el("span", "chip-text", chipText(b)));
+      li.appendChild(prioTag(b));
+      const tip = [b.user + " · " + priorityOf(b) + " · booked " + gibText(b.vram_mib) + " GiB until "
+        + fmtWhen(new Date(b.end))];
+      for (const seg of b.taken || []) tip.push(takenText(seg));
+      if (b.note) tip.push(b.note);
+      li.title = tip.join("\n");
       booked.appendChild(li);
     }
     if (g.bookings.length > 2) booked.appendChild(el("li", "more", "+" + (g.bookings.length - 2) + " more"));
@@ -504,10 +600,13 @@ if (typeof document !== "undefined") (function () {
     const total = g.total_mib || 1;
     let bx = 0;
     for (const b of g.bookings) {
-      const w = Math.min(1000 - bx, (b.vram_mib / total) * 1000);
+      const w = Math.min(1000 - bx, (effectiveMiB(b) / total) * 1000);
       if (w <= 0) continue;
-      const seg = svg("rect", { x: bx, y: 0.75, width: w, height: VB_H - 1.5 }, "booked " + colourClass(b.user));
-      addTitle(seg, b.user + " booked " + gibText(b.vram_mib) + " GiB until " + fmtWhen(new Date(b.end)));
+      const seg = svg("rect", { x: bx, y: 0.75, width: w, height: VB_H - 1.5 },
+        "booked " + priorityOf(b) + " " + colourClass(b.user));
+      addTitle(seg, b.user + " booked " + gibText(b.vram_mib) + " GiB (" + priorityOf(b) + ")"
+        + (effectiveMiB(b) < b.vram_mib ? ", " + gibText(effectiveMiB(b)) + " GiB now" : "")
+        + " until " + fmtWhen(new Date(b.end)));
       bar.appendChild(seg);
       bx += w;
     }
@@ -655,6 +754,7 @@ if (typeof document !== "undefined") (function () {
   // ---------- Bookings ----------
   function renderBookings() {
     if (!state.claims) return;
+    renderPriorityHint();
     renderGpuOptions();
     renderPreview();
     renderCalendar();
@@ -679,9 +779,36 @@ if (typeof document !== "undefined") (function () {
     }
     return { from: from, until: until };
   }
+  function formPriority() { return $("book-important").checked ? "important" : "lendable"; }
+  // Free for the chosen priority: unbooked (all bookings) for lendable, not booked as
+  // important for important.
   function windowFree(gpu, w) {
     if (isNaN(w.from) || isNaN(w.until) || w.until <= w.from) return cardMiB(gpu);
-    return freeVramMiB(state.claims || [], gpu, w.from, w.until, cardMiB(gpu));
+    return freeVramMiB(state.claims || [], gpu, w.from, w.until, cardMiB(gpu), formPriority());
+  }
+  function freeWord() { return formPriority() === "important" ? " free for important" : " free"; }
+  function renderPriorityHint() {
+    $("book-priority-hint").textContent = "Others can't take an important booking. A lendable one can be "
+      + "partly taken by an important booking, with " + state.graceMinutes + " minutes' notice.";
+  }
+  // "Important: you take 40 GiB of alice's lendable booking on GPU 4 from Wed 15:30." ("" if none)
+  function takesSentence(gpu, w, mib) {
+    if (formPriority() !== "important") return "";
+    const takes = takesPreview(state.claims || [], gpu, w.from, w.until, mib, cardMiB(gpu));
+    if (!takes.length) return "";
+    const parts = takes.map((t) => gibText(t.mib) + " GiB of " + t.user + "'s lendable booking on GPU "
+      + gpu + " from " + fmtWhen(new Date(t.from)));
+    let text = " Important: you take " + parts.join("; and ") + ".";
+    // the server gives a booking that is already running notice by moving this start
+    const notice = Date.now() + state.graceMinutes * 60000;
+    const running = takes.filter((t) => t.start <= Date.now());
+    if (running.length && w.from < notice) {
+      const owners = running.map((t) => t.user + "'s").join(" and ");
+      text += " " + owners + (running.length > 1 ? " bookings have" : " booking has")
+        + " already started, so your start moves to about " + fmtWhen(new Date(notice))
+        + " (" + state.graceMinutes + " minutes' notice).";
+    }
+    return text;
   }
 
   function renderUserSelect() {
@@ -705,7 +832,7 @@ if (typeof document !== "undefined") (function () {
     const w = formWindow();
     clear(sel);
     for (const gpu of gpuIds()) {
-      const o = el("option", "", "GPU " + gpu + " — " + fmtGiB(windowFree(gpu, w)) + " free");
+      const o = el("option", "", "GPU " + gpu + " — " + fmtGiB(windowFree(gpu, w)) + freeWord());
       o.value = String(gpu);
       sel.appendChild(o);
     }
@@ -721,25 +848,29 @@ if (typeof document !== "undefined") (function () {
     if (isNaN(w.from) || isNaN(w.until)) { preview.textContent = "Pick when the booking starts and ends."; return; }
     if (w.until <= w.from) { preview.textContent = "“Until” must be after “from”."; return; }
     const free = windowFree(gpu, w), card = cardMiB(gpu);
+    const imp = formPriority() === "important";
+    const kind = imp ? "important " : "", freeAs = imp ? " not booked as important" : " free";
     vram.max = String(Math.floor(free / 1024));
     const span = " on GPU " + gpu + " from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until));
     if (!vram.value) {                          // VRAM is optional: empty books the whole card
       preview.textContent = free < card
-        ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is free in that window — enter less VRAM or pick another time."
-        : "You'd book the whole card (" + fmtGiB(card) + ")" + span + ".";
+        ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is" + freeAs + " in that window — enter less VRAM or pick another time."
+        : "You'd book the whole card (" + fmtGiB(card) + ")" + span + " as " + (imp ? "important" : "lendable") + "."
+          + takesSentence(gpu, w, card);
       return;
     }
     const gib = Number(vram.value);
     if (!(gib > 0)) {
       preview.textContent = "GPU " + gpu + " has " + fmtGiB(free) + " of " + fmtGiB(card)
-        + " free from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until)) + ".";
+        + freeAs + " from " + fmtWhen(new Date(w.from)) + " until " + fmtWhen(new Date(w.until)) + ".";
       return;
     }
     const left = free - gib * 1024;
     preview.textContent = left < 0
-      ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is free in that window — book less or pick another time."
-      : "You'd book " + gibText(gib * 1024) + " of " + fmtGiB(card) + span
-        + "; " + fmtGiB(left) + " stays free.";
+      ? "Only " + fmtGiB(free) + " of GPU " + gpu + " is" + freeAs + " in that window — book less or pick another time."
+      : "You'd book " + gibText(gib * 1024) + " GiB " + kind + "of " + fmtGiB(card) + span
+        + "; " + fmtGiB(left) + (imp ? " stays free for important bookings." : " stays free.")
+        + takesSentence(gpu, w, gib * 1024);
   }
 
   function showBookError(text) {
@@ -764,6 +895,7 @@ if (typeof document !== "undefined") (function () {
     const vram = $("book-vram").value;
     if (vram) payload.vram_gib = Number(vram);  // omitted: the server books the whole card
     if (note) payload.note = note;
+    payload.priority = formPriority();
     state.booking = true;
     $("book-submit").disabled = true;
     const res = await postJson("/api/claims", payload);
@@ -773,10 +905,21 @@ if (typeof document !== "undefined") (function () {
     showBookError("");
     const c = res.body.claim;
     const ok = $("book-ok");
-    ok.textContent = "Booked GPU " + c.gpu + ", " + gibText(c.vram_mib) + " GiB for " + c.user
-      + " until " + fmtWhen(new Date(c.end)) + ".";
+    let text = "Booked GPU " + c.gpu + ", " + gibText(c.vram_mib) + " GiB (" + priorityOf(c) + ") for "
+      + c.user + " until " + fmtWhen(new Date(c.end)) + ".";
+    if (res.body.adjusted_start) {
+      text += " The start moved from " + fmtWhen(new Date(res.body.adjusted_start)) + " to "
+        + fmtWhen(new Date(c.start)) + " to give a running lendable booking "
+        + state.graceMinutes + " minutes' notice.";
+    }
+    for (const t of res.body.takes || []) {
+      text += " Takes " + gibText(t.vram_mib) + " GiB of " + t.user + "'s lendable booking on GPU " + t.gpu
+        + " from " + fmtWhen(new Date(t.start)) + " until " + fmtWhen(new Date(t.end)) + ".";
+    }
+    ok.textContent = text;
     ok.hidden = false;
     $("book-note").value = "";
+    $("book-important").checked = false;          // important is opt-in, per booking
     state.selectedClaim = c.id;
     state.cancelArmed = null;
     loadClaims();
@@ -810,7 +953,15 @@ if (typeof document !== "undefined") (function () {
     const plotW = W - labelW - padR;
     const x = (t) => labelW + ((Math.min(Math.max(t, t0), t1) - t0) / (t1 - t0)) * plotW;
     const chart = svg("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img" }, "calendar");
-    addTitle(chart, "Bookings per GPU, now to +" + CALENDAR_DAYS + " days; bar height = booked share of the card");
+    addTitle(chart, "Bookings per GPU, now to +" + CALENDAR_DAYS + " days; bar height = booked share of the card;"
+      + " hatched = lendable, solid = important");
+    // Hatching for lendable bars: stripes in the panel colour over the (lighter) user colour.
+    const defs = svg("defs");
+    const hatch = svg("pattern", { id: "cal-hatch", width: 6, height: 6, patternUnits: "userSpaceOnUse",
+      patternTransform: "rotate(45)" });
+    hatch.appendChild(svg("rect", { x: 0, y: 0, width: 2, height: 6 }, "hatch-line"));
+    defs.appendChild(hatch);
+    chart.appendChild(defs);
 
     ids.forEach((gpu, i) => {
       const y = axisH + i * rowH;
@@ -847,17 +998,37 @@ if (typeof document !== "undefined") (function () {
         const bx = x(it.s), bw = Math.max(3, x(it.e) - bx);
         const bh = Math.max(3, it.h * inner - 1);
         const by = rowY + inner - (it.off * inner) - bh;   // first booking sits on the row's floor
+        const prio = priorityOf(c);
         const g = svg("g", { tabindex: 0, role: "button" },
-          "cal-bar" + (state.selectedClaim === c.id ? " selected" : ""));
-        g.appendChild(svg("rect", { x: bx, y: by, width: bw, height: bh, rx: 2 }, colourClass(c.user)));
+          "cal-bar " + prio + (state.selectedClaim === c.id ? " selected" : ""));
+        g.appendChild(svg("rect", { x: bx, y: by, width: bw, height: bh, rx: 2 }, "bar " + colourClass(c.user)));
+        if (prio === "lendable") {
+          g.appendChild(svg("rect", { x: bx, y: by, width: bw, height: bh, rx: 2, fill: "url(#cal-hatch)" }, "hatch"));
+        }
+        // Taken parts: the top of the bar over the taken interval becomes a cut-out, so the
+        // bar is only as thick as what the lendable booking keeps there.
+        for (const seg of c.taken || []) {
+          const ss = Math.max(Date.parse(seg.start), it.s), se = Math.min(Date.parse(seg.end), it.e);
+          if (se <= t0 || ss >= t1 || se <= ss) continue;
+          const cx = x(ss), cw = Math.max(1, x(se) - cx);
+          const ch = Math.min(bh, bh * (seg.vram_mib / c.vram_mib));
+          const cut = svg("rect", { x: cx, y: by, width: cw, height: ch }, "taken-cut");
+          addTitle(cut, takenText(seg));
+          g.appendChild(cut);
+          const tl = "taken by " + (seg.by || []).join(", ");
+          if (ch >= 12 && tl.length <= Math.floor((cw - 6) / 6.3)) {
+            g.appendChild(svgText(cx + 3, by + ch / 2 + 4, tl, "taken-label"));
+          }
+        }
         // longest label that fits: with the note, "user · NN GiB", then just "NN GiB"
         const full = c.user + " · " + gibText(c.vram_mib) + " GiB";
         const maxChars = Math.floor((bw - 8) / 6.3);
         const label = [c.note ? full + " · " + c.note : null, full, gibText(c.vram_mib) + " GiB"]
           .find((t) => t !== null && t.length <= maxChars);
         if (bh >= 13 && label) g.appendChild(svgText(bx + 4, by + bh / 2 + 4, label, "bar-label"));
-        addTitle(g, c.user + " · " + gibText(c.vram_mib) + " GiB on GPU " + gpu + "\n"
+        addTitle(g, c.user + " · " + gibText(c.vram_mib) + " GiB on GPU " + gpu + " · " + prio + "\n"
           + fmtLocal(new Date(c.start)) + " – " + fmtLocal(new Date(c.end))
+          + (c.taken || []).map((seg) => "\n" + takenText(seg)).join("")
           + (c.note ? "\n" + c.note : "") + "\nclick for details");
         const pick = () => { state.selectedClaim = c.id; state.cancelArmed = null; renderCalendar(); renderDetail(); };
         g.addEventListener("click", pick);
@@ -898,6 +1069,9 @@ if (typeof document !== "undefined") (function () {
     box.appendChild(head);
     const dl = el("dl");
     detailRow(dl, "window", fmtLocal(new Date(c.start)) + " – " + fmtLocal(new Date(c.end)));
+    detailRow(dl, "priority", priorityOf(c) === "important" ? "important — others can't take it"
+      : "lendable — an important booking can take part of it");
+    for (const seg of c.taken || []) detailRow(dl, "taken", takenText(seg));
     if (c.note) detailRow(dl, "note", c.note);
     detailRow(dl, "booked", fmtLocal(new Date(c.created_at)) + " from " + c.created_ip);
     if (c.cancelled_at) detailRow(dl, "cancelled", fmtLocal(new Date(c.cancelled_at)) + " from " + c.cancelled_ip);
@@ -959,7 +1133,7 @@ if (typeof document !== "undefined") (function () {
       const from = Date.parse(c.start) - Date.parse(c.created_at) > 5 * 60000
         ? " from " + fmtWhen(new Date(c.start)) : "";
       li.appendChild(el("span", "", fmtWhen(new Date(ev.t)) + " · " + ev.what + " GPU " + c.gpu + ", "
-        + gibText(c.vram_mib) + " GiB, for " + c.user + from + " until " + fmtWhen(new Date(c.end))
+        + gibText(c.vram_mib) + " GiB " + priorityOf(c) + ", for " + c.user + from + " until " + fmtWhen(new Date(c.end))
         + " · from " + ev.ip));
       if (c.note) li.title = c.note;
       ul.appendChild(li);
@@ -970,6 +1144,7 @@ if (typeof document !== "undefined") (function () {
     $("book-form").addEventListener("submit", submitBooking);
     $("book-user").addEventListener("change", () => { if ($("book-user").value) storeUser($("book-user").value); });
     $("book-gpu").addEventListener("change", renderPreview);
+    $("book-important").addEventListener("change", () => { renderGpuOptions(); renderPreview(); });
     $("book-vram").addEventListener("input", renderPreview);
     $("book-from").addEventListener("input", () => {
       state.fromAuto = $("book-from").value === "";
@@ -991,6 +1166,7 @@ if (typeof document !== "undefined") (function () {
       renderGpuOptions(); renderPreview();
     });
     renderUserSelect();
+    renderPriorityHint();
     renderGpuOptions();
     renderPreview();
   }

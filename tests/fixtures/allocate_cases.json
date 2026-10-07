@@ -1,0 +1,33 @@
+{
+  "_doc": "Shared cases for the allocation rule: claims.allocate (Python) and allocate() in web/app.js must agree. Bookings are those active at one instant on one GPU; expect maps booking id -> effective MiB.",
+  "cases": [
+    {"name": "empty", "total": 81920, "bookings": [], "expect": {}},
+    {"name": "one lendable fits", "total": 81920,
+     "bookings": [{"id": 1, "vram_mib": 40960, "priority": "lendable"}],
+     "expect": {"1": 40960}},
+    {"name": "important takes from lendable", "total": 81920,
+     "bookings": [{"id": 1, "vram_mib": 81920, "priority": "lendable"},
+                  {"id": 2, "vram_mib": 40960, "priority": "important"}],
+     "expect": {"1": 40960, "2": 40960}},
+    {"name": "newest lendable shrinks first", "total": 81920,
+     "bookings": [{"id": 3, "vram_mib": 40960, "priority": "lendable"},
+                  {"id": 1, "vram_mib": 40960, "priority": "lendable"},
+                  {"id": 5, "vram_mib": 20480, "priority": "important"}],
+     "expect": {"1": 40960, "3": 20480, "5": 20480}},
+    {"name": "lendable squeezed to zero", "total": 81920,
+     "bookings": [{"id": 1, "vram_mib": 30720, "priority": "lendable"},
+                  {"id": 2, "vram_mib": 51200, "priority": "lendable"},
+                  {"id": 7, "vram_mib": 81920, "priority": "important"}],
+     "expect": {"1": 0, "2": 0, "7": 81920}},
+    {"name": "several important plus lendable", "total": 81920,
+     "bookings": [{"id": 1, "vram_mib": 20480, "priority": "important"},
+                  {"id": 2, "vram_mib": 51200, "priority": "lendable"},
+                  {"id": 4, "vram_mib": 30720, "priority": "important"}],
+     "expect": {"1": 20480, "2": 30720, "4": 30720}},
+    {"name": "important over-full never goes negative", "total": 81920,
+     "bookings": [{"id": 1, "vram_mib": 61440, "priority": "important"},
+                  {"id": 2, "vram_mib": 40960, "priority": "important"},
+                  {"id": 3, "vram_mib": 10240, "priority": "lendable"}],
+     "expect": {"1": 61440, "2": 40960, "3": 0}}
+  ]
+}

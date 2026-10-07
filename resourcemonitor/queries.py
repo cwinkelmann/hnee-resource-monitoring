@@ -7,7 +7,7 @@ from itertools import groupby
 from math import ceil
 from pathlib import Path
 
-from resourcemonitor.claims import Booking
+from resourcemonitor.claims import MIB_PER_GIB, Booking, allocate, taken_segments
 from resourcemonitor.energy import UNATTRIBUTED_BUCKET
 
 CAVEATS = [
@@ -35,8 +35,25 @@ def _require_polls(conn: sqlite3.Connection) -> None:
         raise NoHistory("no polls")
 
 
+def _booking_now(b: Booking, effective_mib: int, upcoming: list[Booking], total: int,
+                 now: datetime) -> dict:
+    d = b.to_json()
+    d["effective_mib"] = effective_mib
+    d["taken"] = [_seg_json(s) for s in taken_segments(b, upcoming, total, now, b.end)]
+    return d
+
+
+def _seg_json(s: dict) -> dict:
+    return {"start": s["start"].isoformat(), "end": s["end"].isoformat(),
+            "vram_mib": s["vram_mib"], "vram_gib": round(s["vram_mib"] / MIB_PER_GIB, 1),
+            "by": s["by"]}
+
+
 def latest(conn: sqlite3.Connection, bookings: list[Booking],
-           now: datetime, stale_after_s: int) -> dict:
+           now: datetime, stale_after_s: int, upcoming: list[Booking] | None = None) -> dict:
+    """`bookings` are those active now; `upcoming` (uncancelled, from now on) lets each
+    lendable one report the segments where important bookings take part of it."""
+    upcoming = bookings if upcoming is None else upcoming
     ts = conn.execute("SELECT MAX(ts) FROM polls").fetchone()[0]
     if ts is None:
         raise NoHistory("no polls")
@@ -50,13 +67,18 @@ def latest(conn: sqlite3.Connection, bookings: list[Booking],
             "ORDER BY used_mib DESC, pid", (ts,)):
         procs.setdefault(gpu, []).append(
             {"pid": pid, "user": user, "name": name, "used_mib": used})
-    gpus = [{"gpu": g, "total_mib": total, "used_mib": used, "util_pct": util,
-             "power_w": power, "bookings": [b.to_json() for b in booked.get(g, [])],
-             "booked_mib": (bm := sum(b.vram_mib for b in booked.get(g, []))),
-             "free_mib": max(total - bm, 0), "procs": procs.get(g, [])}
-            for g, total, used, util, power in conn.execute(
-                "SELECT gpu, total_mib, used_mib, util_pct, power_w FROM gpu_samples "
-                "WHERE ts=? ORDER BY gpu", (ts,))]
+    gpus = []
+    for g, total, used, util, power in conn.execute(
+            "SELECT gpu, total_mib, used_mib, util_pct, power_w FROM gpu_samples "
+            "WHERE ts=? ORDER BY gpu", (ts,)):
+        active = booked.get(g, [])
+        eff = allocate(active, total)
+        gpus.append({"gpu": g, "total_mib": total, "used_mib": used, "util_pct": util,
+                     "power_w": power,
+                     "bookings": [_booking_now(b, eff[b.id], upcoming, total, now)
+                                  for b in active],
+                     "booked_mib": (bm := sum(eff.values())),
+                     "free_mib": max(total - bm, 0), "procs": procs.get(g, [])})
     alerts = [{"kind": k, "key": key, "gpu": gpu, "user": user, "text": text, "sent": bool(sent)}
               for k, key, gpu, user, text, sent in conn.execute(
                   "SELECT kind, key, gpu, user, text, sent FROM alerts WHERE ts=? "

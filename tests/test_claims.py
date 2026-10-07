@@ -340,27 +340,29 @@ def test_version_1_file_reads_as_calendar_before_migration(tmp_path):
     conn.close()
 
 
-def test_opening_a_version_1_file_migrates_it_to_version_2(tmp_path):
+def test_opening_a_version_1_file_migrates_it_to_the_current_version(tmp_path):
     path = tmp_path / "v1.sqlite"
     _v1(path)
     s = ClaimsStore(path, users=FakeUsers())
     try:
         assert s.get(1).kind == "calendar" and s.get(1).user == "dorian.zwanzig"
         assert [b.kind for b in s.list_window(T0)] == ["calendar"]
+        assert s.get(1).priority == "important"
     finally:
         s.close()
     conn = sqlite3.connect(path)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
-    assert "kind" in cols and conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert {"kind", "priority"} <= set(cols)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     conn.close()
     ClaimsStore(path, users=FakeUsers()).close()                    # reopening is a no-op
 
 
-def test_new_files_are_created_at_version_2_with_kind(tmp_path):
+def test_new_files_are_created_at_the_current_version_with_kind(tmp_path):
     ClaimsStore(tmp_path / "n.sqlite", users=FakeUsers()).close()
     conn = sqlite3.connect(tmp_path / "n.sqlite")
     assert "kind" in [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     conn.close()
 
 

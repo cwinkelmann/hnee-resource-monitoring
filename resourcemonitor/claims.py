@@ -1,6 +1,10 @@
 """The only module that writes claims.sqlite (GPU bookings). Rows are never deleted:
 cancelling sets cancelled_at/cancelled_ip, so the table is the audit trail.
-The monitor reads bookings with load_active (mode=ro); it never enforces them."""
+The monitor reads bookings with load_active (mode=ro); it never enforces them.
+
+A booking is "important" or "lendable". allocate() decides each booking's effective share at
+an instant: important ones in full, the rest of the card to lendable ones oldest first. What
+an important booking takes from a lendable one is derived from the rows, never stored."""
 from __future__ import annotations
 
 import pwd
@@ -20,11 +24,13 @@ MAX_DAYS = 14
 PAST_SLACK = timedelta(minutes=5)
 NOTE_MAX = 120
 GPU_COUNT = 8
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 QUICK_RESET_HOUR = 9
 QUICK_TZ = "Europe/Berlin"
 QUICK_NOTE = "quick booking"
 QUICK_MIN = timedelta(minutes=1)
+PRIORITIES = ("lendable", "important")
+DEFAULT_GRACE = timedelta(minutes=30)
 
 USER_RE = re.compile(r"^[a-z_][a-z0-9._-]{0,31}$")
 _NOBODY_UID = 65534
@@ -43,16 +49,20 @@ CREATE TABLE IF NOT EXISTS claims (
   created_ip   TEXT    NOT NULL,
   cancelled_at TEXT,
   cancelled_ip TEXT,
-  kind         TEXT    NOT NULL DEFAULT 'calendar'
+  kind         TEXT    NOT NULL DEFAULT 'calendar',
+  priority     TEXT    NOT NULL DEFAULT 'important'
 );
 CREATE INDEX IF NOT EXISTS claims_gpu_window ON claims(gpu, start, end);
 """
 
 _COLUMNS_V1 = ("id, user, gpu, vram_mib, start, end, note, created_at, created_ip, "
                "cancelled_at, cancelled_ip")
-_COLUMNS = _COLUMNS_V1 + ", kind"
-# A version-1 file (no kind column) read before the web process migrated it: all calendar.
-_COLUMNS_V1_AS_V2 = _COLUMNS_V1 + ", 'calendar'"
+_COLUMNS = _COLUMNS_V1 + ", kind, priority"
+# Older files read before the web process migrated them: version 1 has no kind (all
+# calendar), version 2 no priority. Rows from before priorities existed blocked everyone,
+# so they read as important.
+_COLUMNS_V2_AS_V3 = _COLUMNS_V1 + ", kind, 'important'"
+_COLUMNS_V1_AS_V3 = _COLUMNS_V1 + ", 'calendar', 'important'"
 
 
 @dataclass(frozen=True)
@@ -69,6 +79,7 @@ class Booking:
     cancelled_at: datetime | None = None
     cancelled_ip: str | None = None
     kind: str = "calendar"                  # "calendar" (the form) or "quick" (a card's holder)
+    priority: str = "lendable"              # "lendable" or "important"
 
     def active_at(self, t: datetime) -> bool:
         return self.cancelled_at is None and self.start <= t < self.end
@@ -82,8 +93,17 @@ class Booking:
             "start": iso(self.start), "end": iso(self.end), "note": self.note,
             "created_at": iso(self.created_at), "created_ip": self.created_ip,
             "cancelled_at": iso(self.cancelled_at), "cancelled_ip": self.cancelled_ip,
-            "kind": self.kind,
+            "kind": self.kind, "priority": self.priority,
         }
+
+
+@dataclass(frozen=True)
+class Created:
+    """A new booking, the lendable bookings it takes from, and the start it asked for if the
+    grace period moved it (else None)."""
+    booking: Booking
+    takes: list[dict]
+    adjusted_start: datetime | None = None
 
 
 class ClaimError(Exception):
@@ -153,7 +173,8 @@ def _ts(d: datetime | None) -> datetime | None:
 def _row(r: tuple) -> Booking:
     return Booking(id=r[0], user=r[1], gpu=r[2], vram_mib=r[3], start=_ts(r[4]),
                    end=_ts(r[5]), note=r[6], created_at=_ts(r[7]), created_ip=r[8],
-                   cancelled_at=_ts(r[9]), cancelled_ip=r[10], kind=r[11])
+                   cancelled_at=_ts(r[9]), cancelled_ip=r[10], kind=r[11],
+                   priority=r[12])
 
 
 def _validate_user(users: UserDirectory, user: str) -> None:
@@ -190,10 +211,78 @@ def _validate(users: UserDirectory, user: str, gpu: int, vram_mib: int, start: d
     return note if note.strip() else None
 
 
+def allocate(active: list[Booking], total_mib: int) -> dict[int, int]:
+    """Effective MiB per booking id, for bookings active at one instant on one GPU.
+    Important bookings get their full VRAM; what the card has left goes to lendable ones
+    oldest (lowest id) first, so the newest lendable booking is the first to shrink."""
+    out = {b.id: b.vram_mib for b in active if b.priority == "important"}
+    left = total_mib - sum(out.values())
+    for b in sorted((b for b in active if b.priority != "important"), key=lambda b: b.id):
+        out[b.id] = max(0, min(b.vram_mib, left))
+        left -= out[b.id]
+    return out
+
+
+def _spans(bookings: list[Booking], lo: datetime, hi: datetime):
+    """Yield (start, end, active) over [lo, hi), cut wherever a booking starts or ends, so
+    the set of active (uncancelled) bookings is constant inside each span."""
+    live = [b for b in bookings if b.cancelled_at is None and b.start < hi and b.end > lo]
+    cuts = sorted({lo, hi} | {t for b in live for t in (b.start, b.end) if lo < t < hi})
+    for a, z in zip(cuts, cuts[1:]):
+        yield a, z, [b for b in live if b.start <= a < b.end]
+
+
+def _merge(segs: list[dict], seg: dict, same: tuple[str, ...]) -> None:
+    """Append seg, or extend the last segment if it ends where seg starts and matches."""
+    last = segs[-1] if segs else None
+    if last and last["end"] == seg["start"] and all(last[k] == seg[k] for k in same):
+        last["end"] = seg["end"]
+    else:
+        segs.append(seg)
+
+
+def taken_segments(b: Booking, bookings: list[Booking], total_mib: int, lo: datetime,
+                   hi: datetime) -> list[dict]:
+    """Where lendable booking b gets less than it booked, within [lo, hi): merged segments
+    {start, end, vram_mib taken, by: users of the important bookings active then}.
+    `bookings` are other rows (any GPU; b itself may be among them)."""
+    if b.priority == "important" or b.cancelled_at is not None:
+        return []
+    others = [o for o in bookings if o.gpu == b.gpu and o.id != b.id]
+    segs: list[dict] = []
+    for a, z, active in _spans(others + [b], max(lo, b.start), min(hi, b.end)):
+        short = b.vram_mib - allocate(active, total_mib).get(b.id, b.vram_mib)
+        if short > 0:
+            by = sorted({o.user for o in active if o.priority == "important"})
+            _merge(segs, {"start": a, "end": z, "vram_mib": short, "by": by}, ("vram_mib", "by"))
+    return segs
+
+
+def takes_of(new: Booking, existing: list[Booking], total_mib: int) -> list[dict]:
+    """What `new` takes from lendable bookings: per squeezed booking, merged segments
+    {id, user, gpu, vram_mib, start, end}, ordered by start then id."""
+    others = [o for o in existing if o.gpu == new.gpu and o.id != new.id]
+    per: dict[int, list[dict]] = {}
+    for a, z, active in _spans(others, new.start, new.end):
+        before = allocate(active, total_mib)
+        after = allocate(active + [new], total_mib)
+        for o in active:
+            lost = before[o.id] - after[o.id]
+            if lost > 0:
+                _merge(per.setdefault(o.id, []), {"id": o.id, "user": o.user, "gpu": o.gpu,
+                                                  "vram_mib": lost, "start": a, "end": z},
+                       ("vram_mib",))
+    return sorted((s for segs in per.values() for s in segs),
+                  key=lambda s: (s["start"], s["id"]))
+
+
 def _check_capacity(overlapping: list[Booking], gpu: int, vram_mib: int, start: datetime,
-                    end: datetime, card_mib: int) -> None:
+                    end: datetime, card_mib: int, priority: str = "lendable") -> None:
     """Booked VRAM only rises at a booking's start, so checking the new window's start
-    and every overlapping start inside it covers the worst instant."""
+    and every overlapping start inside it covers the worst instant. A lendable booking
+    must fit beside every booking; an important one only beside the important ones."""
+    if priority == "important":
+        overlapping = [b for b in overlapping if b.priority == "important"]
     instants = sorted({start} | {b.start for b in overlapping if start < b.start < end})
     for t in instants:
         active = [b for b in overlapping if b.active_at(t)]
@@ -208,8 +297,9 @@ def _check_capacity(overlapping: list[Booking], gpu: int, vram_mib: int, start: 
                 raise ClaimError(409, f"GPU {gpu} is held by {h.user} until {until} "
                                       "(quick booking) — set its holder to free first")
             t2 = min(min(b.end for b in active), end)
-            free = (card_mib - booked) / MIB_PER_GIB
-            raise ClaimError(409, f"GPU {gpu} has only {free:.1f} GiB unbooked between "
+            free = max(card_mib - booked, 0) / MIB_PER_GIB
+            what = "not booked as important" if priority == "important" else "unbooked"
+            raise ClaimError(409, f"GPU {gpu} has only {free:.1f} GiB {what} between "
                                   f"{t.strftime(_TIME_FMT)} and {t2.strftime(_TIME_FMT)}")
 
 
@@ -231,8 +321,10 @@ class ClaimsStore:
             raise
 
     def _migrate(self) -> None:
-        """Version 1 -> 2 adds claims.kind; existing rows become 'calendar'. One transaction,
-        and the column is checked first, so a half-done or repeated run is harmless."""
+        """Version 1 -> 2 adds claims.kind; existing rows become 'calendar'. 2 -> 3 adds
+        claims.priority; existing rows become 'important', since they were made when every
+        booking blocked others. One transaction, and each column is checked first, so a
+        half-done or repeated run is harmless."""
         conn = self._conn
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -241,6 +333,9 @@ class ClaimsStore:
                 if "kind" not in cols:
                     conn.execute("ALTER TABLE claims ADD COLUMN kind TEXT NOT NULL "
                                  "DEFAULT 'calendar'")
+                if "priority" not in cols:
+                    conn.execute("ALTER TABLE claims ADD COLUMN priority TEXT NOT NULL "
+                                 "DEFAULT 'important'")
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except BaseException:
@@ -250,9 +345,16 @@ class ClaimsStore:
 
     def create(self, *, user: str, gpu: int, vram_mib: int, start: datetime, end: datetime,
                note: str | None, ip: str, now: datetime,
-               card_mib: int = DEFAULT_CARD_MIB) -> Booking:
+               card_mib: int = DEFAULT_CARD_MIB, priority: str = "lendable",
+               grace: timedelta = DEFAULT_GRACE) -> Created:
+        """Book, or raise ClaimError. An important booking that would squeeze a lendable
+        booking already under way starts no earlier than now + grace; the start it asked
+        for is then returned as adjusted_start."""
+        if priority not in PRIORITIES:
+            raise ClaimError(400, "priority must be lendable or important")
         start, end, now = _utc(start), _utc(end), _utc(now)
         note = _validate(self.users, user, gpu, vram_mib, start, end, note, now, card_mib)
+        asked = start
         with self._lock:
             conn = self._conn
             conn.execute("BEGIN IMMEDIATE")
@@ -260,20 +362,39 @@ class ClaimsStore:
                 overlapping = [_row(r) for r in conn.execute(
                     f"SELECT {_COLUMNS} FROM claims WHERE gpu = ? AND cancelled_at IS NULL "
                     "AND start < ? AND end > ?", (gpu, end.isoformat(), start.isoformat()))]
-                _check_capacity(overlapping, gpu, vram_mib, start, end, card_mib)
+                _check_capacity(overlapping, gpu, vram_mib, start, end, card_mib, priority)
+
+                def draft(s: datetime) -> Booking:
+                    return Booking(id=0, user=user, gpu=gpu, vram_mib=vram_mib, start=s,
+                                   end=end, note=note, created_at=now, created_ip=ip,
+                                   priority=priority)
+                takes = takes_of(draft(start), overlapping, card_mib) \
+                    if priority == "important" else []
+                running = {b.id for b in overlapping if b.start <= now}
+                if any(t["id"] in running and t["start"] < now + grace for t in takes):
+                    start = now + grace          # rounded up to the whole minute
+                    if start.second or start.microsecond:
+                        start = start.replace(second=0, microsecond=0) + timedelta(minutes=1)
+                    if end <= start:
+                        raise ClaimError(409, "this takes from a lendable booking that is "
+                                              "already running, so it must last beyond "
+                                              f"{int(grace.total_seconds() // 60)} minutes "
+                                              "from now")
+                    takes = takes_of(draft(start), overlapping, card_mib)
                 cur = conn.execute(
                     "INSERT INTO claims (user, gpu, vram_mib, start, end, note, created_at, "
-                    "created_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "created_ip, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (user, gpu, vram_mib, start.isoformat(), end.isoformat(), note,
-                     now.isoformat(), ip))
+                     now.isoformat(), ip, priority))
                 claim_id = cur.lastrowid
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
                 raise
-        return Booking(id=claim_id, user=user, gpu=gpu, vram_mib=vram_mib, start=start,
-                       end=end, note=note, created_at=now, created_ip=ip)
+        booking = Booking(id=claim_id, user=user, gpu=gpu, vram_mib=vram_mib, start=start,
+                          end=end, note=note, created_at=now, created_ip=ip, priority=priority)
+        return Created(booking, takes, asked if start != asked else None)
 
     def quick(self, *, user: str | None, gpu: int, ip: str, now: datetime,
               card_mib: int = DEFAULT_CARD_MIB) -> Booking | None:
@@ -311,7 +432,8 @@ class ClaimsStore:
                 if user is not None:
                     claim_id = conn.execute(
                         "INSERT INTO claims (user, gpu, vram_mib, start, end, note, created_at, "
-                        "created_ip, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'quick')",
+                        "created_ip, kind, priority) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'quick', 'lendable')",
                         (user, gpu, card_mib, ts, end.isoformat(), QUICK_NOTE, ts,
                          ip)).lastrowid
                 conn.execute("COMMIT")
@@ -322,7 +444,8 @@ class ClaimsStore:
         if claim_id is None:
             return None
         return Booking(id=claim_id, user=user, gpu=gpu, vram_mib=card_mib, start=now, end=end,
-                       note=QUICK_NOTE, created_at=now, created_ip=ip, kind="quick")
+                       note=QUICK_NOTE, created_at=now, created_ip=ip, kind="quick",
+                       priority="lendable")
 
     def cancel(self, claim_id: int, *, ip: str, now: datetime) -> Booking:
         """Idempotent: cancelling an already-cancelled booking changes nothing."""
@@ -371,7 +494,7 @@ class ClaimsStore:
 def _read_ro(path: Path | str, where: str, params: tuple) -> list[Booking]:
     """SELECT booking rows matching `where` with mode=ro. Fail-open: a missing, corrupt, locked
     or malformed file means no bookings, and the error is printed by exception class only.
-    A version-1 file the web process has not migrated yet reads as all-calendar."""
+    A file the web process has not migrated yet reads as calendar (v1) and important."""
     try:
         path = Path(path)
         if not path.exists():
@@ -380,7 +503,8 @@ def _read_ro(path: Path | str, where: str, params: tuple) -> list[Booking]:
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
         try:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
-            select = _COLUMNS if "kind" in cols else _COLUMNS_V1_AS_V2
+            select = (_COLUMNS if "priority" in cols else
+                      _COLUMNS_V2_AS_V3 if "kind" in cols else _COLUMNS_V1_AS_V3)
             rows = conn.execute(f"SELECT {select} FROM claims {where}", params).fetchall()
         finally:
             conn.close()

@@ -153,6 +153,15 @@ select.holder:disabled { color: var(--muted); }
 .card-bookings { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; color: var(--text-2); }
 .card-bookings li { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-bookings .none, .card-bookings .more { color: var(--muted); }
+.card-bookings .chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.prio {
+  flex: none; font-size: 10px; line-height: 1.3; padding: 0 4px; border-radius: 3px;
+  border: 1px dashed var(--border); color: var(--muted);
+}
+.prio.important { border-style: solid; border-color: var(--text-2); color: var(--text); font-weight: 600; }
+/* a lendable booking's swatch is hatched, like its calendar bar */
+.swatch.lendable { background-image: repeating-linear-gradient(45deg, transparent 0 2px, var(--panel) 2px 3.5px); opacity: 0.8; }
+.vram rect.booked.lendable { stroke-dasharray: 3 2; }
 .vram { display: block; width: 100%; height: 12px; margin: 8px 0 3px; }
 .vram .track { fill: var(--track); }
 .vram rect.booked { fill-opacity: 0.16; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
@@ -213,7 +222,10 @@ svg .empty-note { fill: var(--muted); font-size: 12px; }
   align-content: start; font-size: 13px;
 }
 .book-form h3, .book-form .book-preview, .book-form .book-actions,
-.book-form .book-error, .book-form .book-ok { grid-column: 1 / -1; }
+.book-form .book-error, .book-form .book-ok, .book-form .priority-hint { grid-column: 1 / -1; }
+.book-form label.check { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; }
+.book-form input[type="checkbox"] { width: auto; margin: 0; }
+.book-form .priority-hint { margin: -2px 0 0; }
 .book-form h3 { margin-top: 0; }
 .book-form label, .book-form .label { color: var(--text-2); font-size: 12px; }
 .book-form input, .book-form select {
@@ -236,7 +248,15 @@ button.link { font: inherit; font-size: 12px; border: 0; background: none; color
 svg.calendar .cal-bar { cursor: pointer; }
 svg.calendar .cal-bar:hover rect, svg.calendar .cal-bar:focus rect { opacity: 0.85; }
 svg.calendar .cal-bar:focus { outline: none; }
-svg.calendar .cal-bar.selected rect { stroke: var(--text); stroke-width: 2; }
+svg.calendar .cal-bar.selected rect.bar { stroke: var(--text); stroke-width: 2; }
+/* lendable: lighter and hatched (stripes in the panel colour, so light and dark both work);
+   important: solid. Taken parts of a lendable bar are cut out (panel colour, dashed edge). */
+svg.calendar .cal-bar.lendable rect.bar { fill-opacity: 0.6; }
+svg.calendar .hatch-line { fill: var(--panel); fill-opacity: 0.55; }
+svg.calendar rect.hatch { pointer-events: none; }
+svg.calendar rect.taken-cut { fill: var(--panel); fill-opacity: 0.9; stroke: var(--text-2); stroke-width: 1; stroke-dasharray: 3 2; }
+svg.calendar .cal-bar:hover rect.taken-cut, svg.calendar .cal-bar:focus rect.taken-cut { opacity: 1; }
+svg.calendar text.taken-label { fill: var(--text-2); font-size: 10px; pointer-events: none; }
 .booking-detail { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; max-width: 560px; }
 .detail-head { display: flex; align-items: center; gap: 8px; }
 .booking-detail dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 8px 0; }
