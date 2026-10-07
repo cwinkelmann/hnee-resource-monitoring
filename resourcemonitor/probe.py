@@ -8,6 +8,8 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
+from resourcemonitor.host import (HostSample, ProcTicks, parse_loadavg, parse_meminfo,
+                                  parse_pid_stat, parse_stat_cpu)
 from resourcemonitor.model import GpuProcess, GpuState, Snapshot
 
 GPU_FIELDS = "index,uuid,memory.total,memory.used,utilization.gpu,power.draw"
@@ -201,3 +203,47 @@ def probe() -> Snapshot:
         gpus=parse_gpu_query(gpu_text),
         procs=procs,
     )
+
+
+SYSTEM_UID_MAX = 999            # below 1000: root and service accounts, reported as "system"
+SYSTEM = "system"
+
+
+def _read(path: str) -> str:
+    with open(path) as f:
+        return f.read()
+
+
+def probe_host() -> HostSample:
+    """CPU and RAM counters of the box and of every process, from /proc. Processes that
+    exit or cannot be read while scanning are skipped, never guessed."""
+    taken_at = datetime.now(timezone.utc)
+    busy, total = parse_stat_cpu(_read("/proc/stat"))
+    mem = parse_meminfo(_read("/proc/meminfo"))
+    page_kib = os.sysconf("SC_PAGE_SIZE") // 1024
+    names: dict[int, str | None] = {}
+    procs = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            start, ticks, rss_pages = parse_pid_stat(_read(f"/proc/{entry}/stat"))
+            uid = _parse_status_uid(_read(f"/proc/{entry}/status"))
+        except (OSError, ValueError, IndexError, UnicodeDecodeError):
+            continue
+        if uid is None:
+            user = None
+        elif uid <= SYSTEM_UID_MAX:
+            user = SYSTEM
+        else:
+            if uid not in names:
+                names[uid] = _name_of_uid(uid)
+            user = names[uid]
+        procs.append(ProcTicks(int(entry), start, user, ticks, rss_pages * page_kib))
+    return HostSample(
+        taken_at=taken_at, uptime_s=float(_read("/proc/uptime").split()[0]),
+        ncpu=os.cpu_count() or 1, cpu_busy=busy, cpu_total=total,
+        load1=parse_loadavg(_read("/proc/loadavg")),
+        mem_total_kib=mem["MemTotal"], mem_avail_kib=mem["MemAvailable"],
+        swap_total_kib=mem.get("SwapTotal", 0), swap_free_kib=mem.get("SwapFree", 0),
+        procs=tuple(procs))

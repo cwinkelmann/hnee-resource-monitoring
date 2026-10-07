@@ -197,3 +197,52 @@ def test_page_shows_priority_and_taken_segments():
     assert 'taken: "' in js                                  # an icon for the "taken" alert kind
     css = (WEB / "app.css").read_text()
     assert "repeating-linear-gradient" in css and ".hatch-line" in css and "taken-cut" in css
+
+
+def test_cpu_ram_card_sits_in_the_now_panel_hidden_until_there_is_data():
+    html = (WEB / "index.html").read_text()
+    now = html[html.index('id="now"'):html.index('id="bookings"')]
+    tag = re.search(r'<div id="box-wrap"[^>]*>', now).group(0)
+    assert "hidden" in tag                                   # box is null until the first CPU/RAM poll
+    assert 'id="box-card"' in now and 'class="card box-card"' in now
+    assert now.index('id="gpu-grid"') < now.index('id="box-wrap"')
+    js = (WEB / "app.js").read_text()
+    assert "renderBox(d.box)" in js and 'wrap.hidden = !b' in js
+    assert '"measured from the next poll"' in js            # cores_busy is null after a restart
+    assert "b.swap_total_mib > 0" in js                     # no swap line on a box without swap
+
+
+def test_cpu_ram_caveats_are_on_the_page():
+    html = (WEB / "index.html").read_text()
+    assert 'id="box-caveats" class="caveats"' in html
+    assert ("Per-user RAM sums each process's resident memory, so memory shared between "
+            "processes counts more than once.") in html
+    assert "Processes run as root (e.g. many Docker containers) count under system." in html
+
+
+def test_timeline_has_cpu_and_ram_rows_from_the_server_thresholds():
+    js = (WEB / "app.js").read_text()
+    assert 'label: "CPU"' in js and 'label: "RAM"' in js
+    assert "coresFloorLabel(d.box.cpu_min_cores)" in js and "gibFloorLabel(d.box.ram_min_mib)" in js
+    body = re.search(r"^  function renderTimeline\(.*?^  \}$", js, re.S | re.M).group(0)
+    assert body.count("packLanes(") == 2                    # overlapping users get lanes, like GPU jobs
+
+
+def test_system_is_grey_and_never_takes_a_user_colour():
+    js = (WEB / "app.js").read_text()
+    assert 'const SYSTEM = "system"' in js
+    assert 'n === SYSTEM) continue' in js                   # registerUsers skips it
+    assert 'user === SYSTEM) return "idle"' in js
+    css = (WEB / "app.css").read_text()
+    assert css.count("--on-idle:") == 2                     # light and dark
+
+
+def test_cpu_ram_formatting_helpers():
+    import shutil, subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    out = subprocess.run([node, "tests/js/test_box.mjs"], capture_output=True, text=True,
+                         timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert "ok" in out.stdout

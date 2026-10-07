@@ -141,9 +141,35 @@ function bookedSteps(claims, gpu, t0, t1) {
   steps.push({ t: t1, mib: steps[steps.length - 1].mib });
   return steps;
 }
+
+// ---------- CPU & RAM (display only: never booked, no alerts) ----------
+// Cores busy, averaged over the poll interval: 12.345 -> "12.3"; null (the first poll after a
+// restart has nothing to average over) -> "—".
+function fmtCores(c) {
+  return typeof c === "number" && isFinite(c) ? c.toFixed(1) : "—";
+}
+// MiB -> GiB with one decimal, no unit: 40960 -> "40.0".
+function gib1(mib) { return (mib / 1024).toFixed(1); }
+// Timeline row sub-labels from the server's thresholds: 1 -> "≥ 1 core", 65536 -> "≥ 64 GiB".
+function coresFloorLabel(n) {
+  return "≥ " + (Number.isInteger(n) ? String(n) : n.toFixed(1)) + (n === 1 ? " core" : " cores");
+}
+function gibFloorLabel(mib) {
+  const g = mib / 1024;
+  return "≥ " + (Number.isInteger(g) ? String(g) : g.toFixed(1)) + " GiB";
+}
+// A CPU / RAM run's peak as text: "peak 12.3 cores", "peak 80.0 GiB RAM".
+function boxRunPeak(kind, peak) {
+  return kind === "cpu" ? "peak " + fmtCores(peak) + " cores" : "peak " + gib1(peak) + " GiB RAM";
+}
+// The Now card's user list: at most `n`, in the server's order (cores desc, then RSS desc).
+function topBoxUsers(box, n) {
+  return box && Array.isArray(box.users) ? box.users.slice(0, n) : [];
+}
 if (typeof module !== "undefined") {
   module.exports = {
     freeVramMiB, allocate, takesPreview, makeDebouncer, vramBucketOrder, stackSeries, bookedSteps,
+    fmtCores, coresFloorLabel, gibFloorLabel, boxRunPeak, topBoxUsers,
   };
 }
 
@@ -169,6 +195,8 @@ if (typeof document !== "undefined") (function () {
   // Arrow keys / type-ahead on a closed select fire change per keystroke (Windows, Linux):
   // only the pick that stays this long is booked. Enter and leaving the dropdown send at once.
   const HOLDER_DEBOUNCE_MS = 600;
+  const SYSTEM = "system";                    // CPU/RAM bucket for every UID below 1000
+  const BOX_USERS_SHOWN = 8;
 
   const state = {
     now: null, timeline: null, usage: null, timeseries: null,
@@ -249,7 +277,7 @@ if (typeof document !== "undefined") (function () {
   function registerUsers(names) {
     let added = false;
     for (const n of names) {
-      if (n === null || n === undefined || n.startsWith("(")) continue;
+      if (n === null || n === undefined || n.startsWith("(") || n === SYSTEM) continue;
       if (!state.users.includes(n)) { state.users.push(n); added = true; }
     }
     if (added) state.users.sort();
@@ -257,7 +285,7 @@ if (typeof document !== "undefined") (function () {
   }
   function colourClass(user) {
     if (user === null || user === undefined || user === "(unattributed)") return "unatt";
-    if (user === "(idle)") return "idle";
+    if (user === "(idle)" || user === SYSTEM) return "idle";   // system: grey, not a palette slot
     const i = state.users.indexOf(user);
     return "u" + ((i < 0 ? 0 : i) % PALETTE_SIZE);
   }
@@ -405,6 +433,7 @@ if (typeof document !== "undefined") (function () {
       for (const b of g.bookings) names.push(b.user);
       for (const p of g.procs) names.push(p.user);
     }
+    for (const u of topBoxUsers(data.box, BOX_USERS_SHOWN)) names.push(u.user);
     if (registerUsers(names)) renderAll(); else { renderNow(); renderTimeline(); renderBookings(); }
   }
   async function loadTimeline() {
@@ -420,6 +449,7 @@ if (typeof document !== "undefined") (function () {
     if (claims) state.timelineClaims = claims.claims;
     const names = state.timelineClaims.map((c) => c.user);
     for (const k in data.gpus) for (const j of data.gpus[k]) names.push(j.user);
+    if (data.box) for (const r of (data.box.cpu || []).concat(data.box.ram || [])) names.push(r.user);
     if (registerUsers(names)) renderAll(); else { renderTimeline(); renderVram(); }   // claims feed both
   }
   async function loadClaims() {
@@ -526,6 +556,7 @@ if (typeof document !== "undefined") (function () {
         else grid.appendChild(card);
       }
     }
+    renderBox(d.box);
 
     // Slack wording only when the monitor recorded its mode: one line for a dry run,
     // a per-alert status only when it is really posting, nothing for older histories.
@@ -646,6 +677,80 @@ if (typeof document !== "undefined") (function () {
     }
     card.appendChild(ul);
     return card;
+  }
+
+  // ---------- Now: the CPU & RAM card (display only) ----------
+  // box: null before the first CPU/RAM poll (or from an older server) -> the card is hidden.
+  function renderBox(b) {
+    const wrap = $("box-wrap"), card = $("box-card");
+    wrap.hidden = !b;
+    clear(card);
+    if (!b) return;
+
+    const head = el("div", "card-head");
+    head.appendChild(el("span", "gpu", "CPU & RAM"));
+    head.appendChild(el("span", "free", b.ncpu + " cores · " + fmtGiB(b.mem_total_mib) + " RAM"));
+    card.appendChild(head);
+
+    const m = el("div", "metrics box-metrics");
+    const cpu = el("span");
+    cpu.appendChild(el("b", "", fmtCores(b.cores_busy)));
+    cpu.appendChild(document.createTextNode(" / " + b.ncpu + " cores busy"));
+    cpu.title = "average over the last poll interval";
+    m.appendChild(cpu);
+    if (b.cores_busy === null || b.cores_busy === undefined) {
+      m.appendChild(el("span", "hint", "measured from the next poll"));
+    }
+    if (typeof b.load1 === "number") {
+      const ld = el("span");
+      ld.appendChild(el("b", "", fmtNum(b.load1, 1)));
+      ld.appendChild(document.createTextNode(" load (1 min)"));
+      m.appendChild(ld);
+    }
+    card.appendChild(m);
+
+    // RAM bar like the VRAM bar: listed users' resident memory in their colours, the rest of
+    // "used" in grey. RSS double-counts shared memory, so the segments are clipped to the bar.
+    const users = topBoxUsers(b, BOX_USERS_SHOWN);
+    const VB_H = 12;
+    const total = b.mem_total_mib || 1;
+    const bar = svg("svg", { viewBox: "0 0 1000 " + VB_H, preserveAspectRatio: "none", role: "img" }, "vram");
+    bar.appendChild(svg("rect", { x: 0, y: 0, width: 1000, height: VB_H }, "track"));
+    const usedW = Math.min(1000, (b.mem_used_mib / total) * 1000);
+    let x = 0;
+    for (const u of users) {
+      const w = Math.min(usedW - x, (u.rss_mib / total) * 1000);
+      if (w <= 0) continue;
+      const seg = svg("rect", { x: x, y: 3, width: w, height: VB_H - 6 }, colourClass(u.user));
+      addTitle(seg, u.user + " · " + fmtGiB(u.rss_mib) + " resident");
+      bar.appendChild(seg);
+      x += w;
+    }
+    if (usedW - x > 0) bar.appendChild(svg("rect", { x: x, y: 3, width: usedW - x, height: VB_H - 6 }, "idle"));
+    addTitle(bar, b.mem_used_mib.toLocaleString() + " / " + b.mem_total_mib.toLocaleString() + " MiB RAM used");
+    card.appendChild(bar);
+    card.appendChild(el("div", "vram-label", "RAM " + fmtGiB(b.mem_used_mib) + " / " + fmtGiB(b.mem_total_mib)));
+    if (b.swap_total_mib > 0) {
+      card.appendChild(el("div", "vram-label swap-label",
+        "swap " + fmtGiB(b.swap_used_mib) + " / " + fmtGiB(b.swap_total_mib)));
+    }
+
+    const ul = el("ul", "procs box-users");
+    if (!users.length) ul.appendChild(el("li", "none", "nobody above 0.5 cores or 1 GiB"));
+    for (const u of users) {
+      const li = el("li");
+      li.appendChild(swatch(u.user));
+      const who = el("span", "what box-who", u.user);
+      if (u.user === SYSTEM) who.title = "all users below UID 1000, including root";
+      li.appendChild(who);
+      li.appendChild(el("span", "mib", fmtCores(u.cores) + " cores"));
+      li.appendChild(el("span", "mib", gib1(u.rss_mib) + " GiB"));
+      ul.appendChild(li);
+    }
+    if (b.users && b.users.length > users.length) {
+      ul.appendChild(el("li", "none", "+" + (b.users.length - users.length) + " more"));
+    }
+    card.appendChild(ul);
   }
 
   // ---------- quick booking: the holder dropdown on each card ----------
@@ -1207,6 +1312,16 @@ if (typeof document !== "undefined") (function () {
     return label;
   }
 
+  // A run's span for a tooltip: "14:02–15:40" within one day, full dates across days;
+  // e === null (ongoing) -> "14:02 – <endTxt>".
+  function runSpanText(s, e, endTxt) {
+    const a = new Date(s);
+    if (e === null) return fmtLocal(a) + " – " + endTxt;
+    const b = new Date(e);
+    return sameDay(a, b) ? fmtTime(a) + "–" + fmtTime(b) + " (" + a.toLocaleDateString(undefined,
+      { weekday: "short", day: "2-digit", month: "short" }) + ")" : fmtLocal(a) + " – " + fmtLocal(b);
+  }
+
   // Greedy sub-lanes for one GPU row: each job goes in the first lane whose last end
   // is <= its start. jobs: [{start, end}] in ms. Returns {lane: [index per job], count}.
   function packLanes(jobs) {
@@ -1247,18 +1362,43 @@ if (typeof document !== "undefined") (function () {
       rowY += h;
       return row;
     });
+    const gpuRowsEnd = rowY;
+    // CPU and RAM rows below the GPUs (newer servers only): one bar per run of polls a user
+    // spent at/above the row's threshold, overlapping users on lanes like concurrent GPU jobs.
+    const boxRows = [];
+    if (d.box) {
+      const defs = [
+        { kind: "cpu", label: "CPU", sub: coresFloorLabel(d.box.cpu_min_cores), runs: d.box.cpu || [] },
+        { kind: "ram", label: "RAM", sub: gibFloorLabel(d.box.ram_min_mib), runs: d.box.ram || [] },
+      ];
+      for (const def of defs) {
+        const packed = packLanes(def.runs.map((j) => ({ start: new Date(j.start).getTime(), end: endOf(j) })));
+        const h = 2 * rowPad + packed.count * barH + (packed.count - 1) * laneGap;
+        boxRows.push(Object.assign({ lane: packed.lane, y: rowY, h: h }, def));
+        rowY += h;
+      }
+    }
     const H = rowY + 6;
     const plotW = W - labelW - padR;
     const x = (t) => labelW + ((Math.min(Math.max(t, t0), t1) - t0) / (t1 - t0)) * plotW;
 
     const chart = svg("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img" });
-    addTitle(chart, "Timeline of GPU jobs, last " + state.timelineHours + " h");
+    addTitle(chart, "Timeline of GPU jobs" + (boxRows.length ? ", CPU and RAM" : "")
+      + ", last " + state.timelineHours + " h");
 
     rows.forEach((r, i) => {
       if (i % 2 === 0) chart.appendChild(svg("rect", { x: 0, y: r.y, width: W, height: r.h }, "row-band"));
       chart.appendChild(svgText(8, r.y + 14, "GPU " + r.gpu, "row-label"));
       chart.appendChild(svgText(8, r.y + 27, bookedNowLabel(r.gpu), "row-sub"));
     });
+    boxRows.forEach((r, i) => {
+      if ((rows.length + i) % 2 === 0) chart.appendChild(svg("rect", { x: 0, y: r.y, width: W, height: r.h }, "row-band"));
+      chart.appendChild(svgText(8, r.y + 14, r.label, "row-label"));
+      chart.appendChild(svgText(8, r.y + 27, r.sub, "row-sub"));
+    });
+    if (boxRows.length) {
+      chart.appendChild(svg("line", { x1: 0, x2: W, y1: gpuRowsEnd, y2: gpuRowsEnd }, "axis-line box-sep"));
+    }
 
     // Bookings as faint bands behind the job bars (x() clips them to the axis).
     let anyBand = false;
@@ -1332,7 +1472,44 @@ if (typeof document !== "undefined") (function () {
       });
     }
     if (!anyJob) {
-      chart.appendChild(svgText(labelW + plotW / 2, (axisH + rowY) / 2, "No GPU jobs in this range", "empty-note", "middle"));
+      chart.appendChild(svgText(labelW + plotW / 2, (axisH + gpuRowsEnd) / 2, "No GPU jobs in this range", "empty-note", "middle"));
+    }
+
+    // CPU / RAM runs: "alice · peak 12.3 cores · 14:02–15:40".
+    let anySystem = false;
+    for (const r of boxRows) {
+      r.runs.forEach((run, ji) => {
+        const y = r.y + rowPad + r.lane[ji] * (barH + laneGap);
+        const s = new Date(run.start).getTime();
+        const e = endOf(run);
+        const x1 = x(s), w = Math.max(2, x(e) - x1);
+        const cls = colourClass(run.user);
+        if (run.user === SYSTEM) anySystem = true; else usersSeen.add(run.user);
+        const g = svg("g");
+        g.appendChild(svg("rect", { x: x1, y: y, width: w, height: barH, rx: 3 }, "job " + cls));
+        if (run.ongoing && !stale) {
+          const tipX = x1 + w;
+          g.appendChild(svg("polygon", {
+            points: tipX + "," + y + " " + (tipX + 7) + "," + (y + barH / 2) + " " + tipX + "," + (y + barH),
+          }, cls + " ongoing-tip"));
+        }
+        const peak = boxRunPeak(r.kind, run.peak);
+        if (w >= 120) {
+          let label = run.user + " · " + peak;
+          const maxChars = Math.floor((w - 10) / 6.3);
+          if (label.length > maxChars) label = label.slice(0, Math.max(1, maxChars - 1)) + "…";
+          g.appendChild(svgText(x1 + 5, y + barH / 2 + 4, label, "bar-label" + (cls === "idle" ? " on-idle" : "")));
+        }
+        const endTxt = !run.ongoing ? null
+          : stale ? fmtLocal(new Date(liveEnd)) + " (last poll; monitor not running since)" : "now (ongoing)";
+        addTitle(g, [
+          run.user + " · " + peak + " · " + runSpanText(s, run.ongoing ? null : e, endTxt),
+          (r.kind === "cpu" ? "at or above " + r.sub.slice(2) + " busy" : "at or above " + r.sub.slice(2) + " resident")
+            + (run.user === SYSTEM ? " · system = all users below UID 1000" : ""),
+          "duration " + fmtDuration((e - s) / 1000),
+        ].join("\n"));
+        chart.appendChild(g);
+      });
     }
 
     chart.appendChild(svg("line", { x1: nowX, x2: nowX, y1: axisH - 6, y2: H - 2 }, "now-line"));
@@ -1345,6 +1522,11 @@ if (typeof document !== "undefined") (function () {
     }
     if (anyUnatt) {
       const item = el("span", "item"); item.appendChild(swatch(null)); item.appendChild(el("span", "unattributed", "unattributed"));
+      legend.appendChild(item);
+    }
+    if (anySystem) {
+      const item = el("span", "item"); item.appendChild(swatch(SYSTEM));
+      item.appendChild(el("span", "", "system (UID < 1000, incl. root)"));
       legend.appendChild(item);
     }
     if (anyOutside) {
