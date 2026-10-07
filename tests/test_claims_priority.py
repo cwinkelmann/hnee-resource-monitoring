@@ -252,3 +252,10 @@ def test_v2_rows_read_as_important_before_and_after_migration(tmp_path):
 
 def test_to_json_carries_priority():
     assert _b(1, 1, "important").to_json()["priority"] == "important"
+
+
+def test_grace_start_rounds_up_to_the_whole_minute(store):
+    mk(store, gib=80, start=T0 - H, hours=6, now=T0 - H)
+    now = T0 + timedelta(minutes=10, seconds=7, microseconds=5)
+    c = mk(store, user="cwinkelmann", gib=40, priority="important", start=now, now=now)
+    assert c.booking.start == T0 + timedelta(minutes=41)

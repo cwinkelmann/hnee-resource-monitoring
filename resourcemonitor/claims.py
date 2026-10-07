@@ -372,7 +372,9 @@ class ClaimsStore:
                     if priority == "important" else []
                 running = {b.id for b in overlapping if b.start <= now}
                 if any(t["id"] in running and t["start"] < now + grace for t in takes):
-                    start = now + grace
+                    start = now + grace          # rounded up to the whole minute
+                    if start.second or start.microsecond:
+                        start = start.replace(second=0, microsecond=0) + timedelta(minutes=1)
                     if end <= start:
                         raise ClaimError(409, "this takes from a lendable booking that is "
                                               "already running, so it must last beyond "
