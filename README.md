@@ -101,6 +101,17 @@ active calendar booking (then it shows "booked — use the calendar", or "partly
 the calendar" when the bookings leave part of the card unbooked), and a quick booking
 ends early where a calendar booking on that GPU begins. It never cancels a calendar booking.
 
+**Lendable vs important.** A booking is *lendable* unless you tick **Important**; quick holds
+are always lendable. At any moment, important bookings get their full VRAM and the rest of the
+card goes to lendable bookings oldest first, so the newest lendable booking shrinks first.
+An important booking therefore only has to fit beside other important bookings: it may take
+part of a lendable one, and the form and the reply say whose and how much. If that lendable
+booking has already started, the important one starts no earlier than `grace_minutes` (default
+30, `[booking]` in `policy.toml`) from when it is made, so the holder gets notice and a `taken`
+alert. A lendable booking must fit into what is unbooked. Bookings made before this existed
+count as important. Nothing about a take is stored: cancelling the important booking gives the
+capacity back.
+
 This is an **honour system**. The dashboard is unauthenticated, so anyone on the LAN can book
 or cancel in any name; every change is shown with its time and IP address. Anyone who can
 reach the page can book or cancel, including through other host names or addresses that point
@@ -110,7 +121,8 @@ Bookings are reported and **never enforced**: no process is ever signalled, limi
 reprioritised. The monitor only compares each user's real VRAM use on a card with what they
 booked and alerts on a mismatch:
 
-- Use above **110 %** of the booked VRAM raises an alert (exactly 110 % does not).
+- Use above **110 %** of the booked VRAM raises an alert (exactly 110 % does not). For a
+  lendable booking that is partly taken, this is measured against what it has left.
 - Using a card someone booked, beyond its unbooked remainder, raises an alert; unbooked cards
   and unbooked VRAM are free for anyone.
 - A quick hold (holder dropdown) blocks calendar bookings on that card until 09:00 unless its

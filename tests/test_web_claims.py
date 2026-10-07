@@ -542,3 +542,8 @@ def test_now_reports_effective_shares_and_taken_segments(live):
     assert gpu["booked_mib"] == 70 * 1024
     (seg,) = b["taken"]
     assert seg["start"] == "2026-10-06T13:00:00+00:00" and seg["by"] == ["cwinkelmann"]
+
+
+def test_now_names_the_host_by_its_short_name(live):
+    import socket
+    assert _get(live + "/api/now")["host"] == socket.gethostname().split(".")[0]

@@ -493,6 +493,11 @@ if (typeof document !== "undefined") (function () {
   function renderNow() {
     const d = state.now;
     if (!d) return;
+    if (d.host) {                            // the box this server runs on, e.g. carrot or olive
+      const title = d.host + " GPUs";
+      $("page-title").textContent = title;
+      document.title = title;
+    }
     const polled = new Date(d.ts);
     const lp = $("last-poll");
     lp.textContent = "last poll " + fmtLocal(polled);
@@ -798,8 +803,9 @@ if (typeof document !== "undefined") (function () {
     const notice = Date.now() + state.graceMinutes * 60000;
     const running = takes.filter((t) => t.start <= Date.now());
     if (running.length && w.from < notice) {
-      text += " " + running.map((t) => t.user).join(", ") + (running.length > 1 ? " are" : " is")
-        + " already running, so your start moves to about " + fmtWhen(new Date(notice))
+      const owners = running.map((t) => t.user + "'s").join(" and ");
+      text += " " + owners + (running.length > 1 ? " bookings have" : " booking has")
+        + " already started, so your start moves to about " + fmtWhen(new Date(notice))
         + " (" + state.graceMinutes + " minutes' notice).";
     }
     return text;

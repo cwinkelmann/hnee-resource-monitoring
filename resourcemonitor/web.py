@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -381,6 +382,7 @@ class _Handler(BaseHTTPRequestHandler):
             data = latest(conn, bookings, now, self.server.stale_after_s, upcoming)
         finally:
             conn.close()
+        data["host"] = self.server.host_name
         self._json(200, data)
 
     def _healthz(self, query: str) -> None:
@@ -482,6 +484,7 @@ class _Server(ThreadingHTTPServer):
     users: UserDirectory
     store: ClaimsStore | None = None
     store_lock: threading.Lock
+    host_name: str
 
     def server_close(self) -> None:
         super().server_close()
@@ -504,6 +507,7 @@ def make_server(bind: str, port: int, history_path: Path, policy_path: Path,
     srv.claims_path = Path(claims_path)
     srv.users = users if users is not None else PwdUsers()
     srv.store_lock = threading.Lock()                # the store itself opens on the first write
+    srv.host_name = socket.gethostname().split(".")[0]   # carrot.internal -> carrot
     return srv
 
 
