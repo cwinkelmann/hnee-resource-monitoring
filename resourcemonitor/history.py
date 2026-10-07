@@ -6,10 +6,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from resourcemonitor.energy import EnergyRow
+from resourcemonitor.host import HostUsage
 from resourcemonitor.model import Snapshot
 from resourcemonitor.rules import Alert
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2               # 2: host_samples and user_samples (CPU and RAM)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS polls (ts TEXT PRIMARY KEY, dt_s REAL);
@@ -23,6 +24,14 @@ CREATE TABLE IF NOT EXISTS energy_samples (ts TEXT NOT NULL, gpu INTEGER NOT NUL
 CREATE TABLE IF NOT EXISTS alerts (ts TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
   gpu INTEGER, user TEXT, text TEXT NOT NULL, sent INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS host_samples (ts TEXT NOT NULL, ncpu INTEGER NOT NULL,
+  cores_busy REAL, load1 REAL NOT NULL, mem_total_mib INTEGER NOT NULL,
+  mem_used_mib INTEGER NOT NULL, swap_total_mib INTEGER NOT NULL,
+  swap_used_mib INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS user_samples (ts TEXT NOT NULL, user TEXT NOT NULL, cores REAL,
+  rss_mib INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS host_samples_ts ON host_samples(ts);
+CREATE INDEX IF NOT EXISTS user_samples_ts ON user_samples(ts);
 CREATE INDEX IF NOT EXISTS gpu_samples_ts ON gpu_samples(ts);
 CREATE INDEX IF NOT EXISTS proc_samples_ts ON proc_samples(ts);
 CREATE INDEX IF NOT EXISTS proc_samples_gpu_pid_ts ON proc_samples(gpu, pid, ts);
@@ -31,7 +40,8 @@ CREATE INDEX IF NOT EXISTS energy_samples_ts ON energy_samples(ts);
 CREATE INDEX IF NOT EXISTS alerts_ts ON alerts(ts);
 """
 
-_TS_TABLES = ("gpu_samples", "proc_samples", "energy_samples", "alerts")
+_TS_TABLES = ("gpu_samples", "proc_samples", "energy_samples", "alerts", "host_samples",
+              "user_samples")
 SLACK_MODES = ("dry-run", "posting")
 
 
@@ -57,7 +67,7 @@ class HistoryWriter:
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (slack_mode,))
 
     def record(self, snap: Snapshot, dt_s: float | None, energy: list[EnergyRow],
-               alerts: list[Alert], sent_keys: set[str]) -> None:
+               alerts: list[Alert], sent_keys: set[str], box: HostUsage | None = None) -> None:
         ts = snap.taken_at.isoformat()
         with self._conn:
             self._conn.execute("INSERT INTO polls (ts, dt_s) VALUES (?, ?)", (ts, dt_s))
@@ -74,6 +84,15 @@ class HistoryWriter:
                 "INSERT INTO alerts VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [(ts, a.kind, a.key, a.gpu_index, a.user, a.text,
                   1 if a.key in sent_keys else 0) for a in alerts])
+            if box is not None:
+                self._conn.execute(
+                    "INSERT INTO host_samples VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ts, box.ncpu, box.cores_busy, box.load1, box.mem_total_mib,
+                     box.mem_used_mib, box.swap_total_mib, box.swap_used_mib))
+                self._conn.executemany(
+                    "INSERT INTO user_samples VALUES (?, ?, ?, ?)",
+                    [(ts, u.user, None if u.cores is None else round(u.cores, 2), u.rss_mib)
+                     for u in box.users])
         day = snap.taken_at.date()
         if day != self._last_prune:
             self.prune(snap.taken_at)

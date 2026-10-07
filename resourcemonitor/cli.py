@@ -11,11 +11,12 @@ from pathlib import Path
 from resourcemonitor.claims import DEFAULT_CLAIMS, list_window_ro, load_active
 from resourcemonitor.energy import EnergyLedger, format_report
 from resourcemonitor.history import HistoryWriter
+from resourcemonitor.host import HostTracker
 from resourcemonitor.model import Snapshot
 from resourcemonitor.notify import Notifier
 from resourcemonitor.paths import DEFAULT_ENERGY, DEFAULT_HISTORY, DEFAULT_POLICY, DEFAULT_STATE
 from resourcemonitor.policy import load_policy
-from resourcemonitor.probe import probe
+from resourcemonitor.probe import probe, probe_host
 from resourcemonitor.rules import (Alert, IdleTracker, check_bookings, check_capacity, check_takes,
                                     check_unattributed)
 from resourcemonitor.state import State
@@ -47,8 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
-             history=None, claims_path=None) -> int:
+             history=None, claims_path=None, host_tracker=None) -> int:
     snap = probe()
+    box = None
+    if host_tracker is not None:     # CPU and RAM: display only, and never at the GPUs' expense
+        try:
+            box = host_tracker.observe(probe_host())
+        except Exception as e:
+            print(f"cpu/ram probe failed: {e.__class__.__name__}", flush=True)
     dt_s, rows = ledger.accumulate(snap)   # before the rules: a poll always costs energy
     ledger.save(energy_path)
     # load_active is fail-open: a broken claims DB means no bookings, never a skipped rule
@@ -66,7 +73,7 @@ def run_once(pol, state, notifier, tracker, ledger, host, energy_path,
     sent_keys = {a.key for a in fresh} if delivered and not notifier.dry_run else set()
     if history is not None:
         try:
-            history.record(snap, dt_s, rows, alerts, sent_keys)
+            history.record(snap, dt_s, rows, alerts, sent_keys, box)
         except (sqlite3.Error, OSError) as e:
             # class name only: the message may embed paths
             print(f"history write failed: {e.__class__.__name__}", flush=True)
@@ -118,10 +125,11 @@ def main(argv=None) -> int:
         except (sqlite3.Error, OSError) as e:
             print(f"history disabled: {e.__class__.__name__}", flush=True)
 
+    host_tracker = HostTracker(clk_tck=os.sysconf("SC_CLK_TCK"), max_gap_s=args.interval * 5)
     while True:                      # watch
         try:
             run_once(pol, state, notifier, tracker, ledger, host, args.energy,
-                     history=history, claims_path=args.claims)
+                     history=history, claims_path=args.claims, host_tracker=host_tracker)
         except Exception as e:       # a bad poll must not end the service
             # class name only: the message may embed the webhook URL
             print(f"poll failed: {e.__class__.__name__}", flush=True)

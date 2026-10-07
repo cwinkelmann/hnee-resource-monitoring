@@ -84,7 +84,26 @@ def latest(conn: sqlite3.Connection, bookings: list[Booking],
                   "SELECT kind, key, gpu, user, text, sent FROM alerts WHERE ts=? "
                   "ORDER BY rowid", (ts,))]
     return {"ts": ts, "age_s": age_s, "stale": age_s > stale_after_s,
-            "slack": _slack_mode(conn), "gpus": gpus, "alerts": alerts}
+            "slack": _slack_mode(conn), "gpus": gpus, "alerts": alerts,
+            "box": _box_now(conn, ts)}
+
+
+def _box_now(conn: sqlite3.Connection, ts: str) -> dict | None:
+    """CPU and RAM at poll ts; None if that poll has none (or the history predates them)."""
+    try:
+        row = conn.execute(
+            "SELECT ncpu, cores_busy, load1, mem_total_mib, mem_used_mib, swap_total_mib, "
+            "swap_used_mib FROM host_samples WHERE ts = ?", (ts,)).fetchone()
+    except sqlite3.OperationalError:            # written by a monitor without CPU/RAM
+        return None
+    if row is None:
+        return None
+    users = [{"user": u, "cores": c, "rss_mib": r} for u, c, r in conn.execute(
+        "SELECT user, cores, rss_mib FROM user_samples WHERE ts = ? "
+        "ORDER BY COALESCE(cores, 0) DESC, rss_mib DESC, user", (ts,))]
+    keys = ("ncpu", "cores_busy", "load1", "mem_total_mib", "mem_used_mib", "swap_total_mib",
+            "swap_used_mib")
+    return {**dict(zip(keys, row)), "users": users}
 
 
 def _slack_mode(conn: sqlite3.Connection) -> str | None:
@@ -313,4 +332,51 @@ def timeline(conn: sqlite3.Connection, hours: int, now: datetime) -> dict:
     gpus: dict[str, list[dict]] = {str(g): [] for g in sorted(gpu_ids)}
     for g, job in sorted(done, key=lambda gj: (gj[1]["start"], gj[0], gj[1]["pid"])):
         gpus[str(g)].append(job)
-    return {"from": lo, "to": hi, "gpus": gpus}
+    return {"from": lo, "to": hi, "gpus": gpus, "box": _box_runs(conn, lo, hi, last_poll)}
+
+
+BOX_CPU_MIN_CORES = 1.0
+BOX_RAM_MIN_MIB = 64 * 1024
+
+
+def _box_runs(conn: sqlite3.Connection, lo: str, hi: str, last_poll: str) -> dict:
+    """Per user, runs of consecutive polls at or above the CPU or the RAM threshold, split
+    at monitoring gaps (dt_s NULL). A run open at the window's start is cut there."""
+    out = {"cpu": [], "ram": [], "cpu_min_cores": BOX_CPU_MIN_CORES,
+           "ram_min_mib": BOX_RAM_MIN_MIB}
+    try:
+        cur = conn.execute(
+            "SELECT p.ts, p.dt_s, u.user, u.cores, u.rss_mib FROM polls p "
+            "LEFT JOIN user_samples u ON u.ts = p.ts WHERE p.ts >= ? AND p.ts <= ? "
+            "ORDER BY p.ts", (lo, hi))
+    except sqlite3.OperationalError:            # written by a monitor without CPU/RAM
+        return out
+    open_runs: dict[str, dict[str, dict]] = {"cpu": {}, "ram": {}}
+
+    def close(metric: str, users) -> None:
+        for u in users:
+            run = open_runs[metric].pop(u)
+            run["ongoing"] = run["end"] == last_poll
+            out[metric].append(run)
+
+    for ts, group in groupby(cur, key=lambda r: r[0]):
+        group = list(group)
+        if group[0][1] is None:
+            for m in open_runs:
+                close(m, list(open_runs[m]))
+        present = {
+            "cpu": {u: c for _, _, u, c, _ in group
+                    if u is not None and c is not None and c >= BOX_CPU_MIN_CORES},
+            "ram": {u: r for _, _, u, _, r in group if u is not None and r >= BOX_RAM_MIN_MIB},
+        }
+        for m, now_in in present.items():
+            close(m, [u for u in open_runs[m] if u not in now_in])
+            for u, v in now_in.items():
+                run = open_runs[m].setdefault(
+                    u, {"user": u, "start": ts, "end": ts, "peak": v, "ongoing": False})
+                run["end"], run["peak"] = ts, max(run["peak"], v)
+    for m in open_runs:
+        close(m, list(open_runs[m]))
+    for m in ("cpu", "ram"):
+        out[m].sort(key=lambda r: (r["start"], r["user"]))
+    return out

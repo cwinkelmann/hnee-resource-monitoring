@@ -14,6 +14,7 @@
   --danger-bg: #fbe4e3;
   --warn: #b77a00;
   --idle: #b4b3ad;
+  --on-idle: #1a1a19;
   --unatt: #eda100;
   --unatt-stroke: #8a5c00;
   --util: #2a78d633;
@@ -47,6 +48,7 @@
     --danger-bg: #3a1716;
     --warn: #f0b429;
     --idle: #5a5a55;
+    --on-idle: #f4f4f1;
     --unatt: #c98500;
     --unatt-stroke: #ffd27a;
     --util: #3987e540;
@@ -177,6 +179,14 @@ select.holder:disabled { color: var(--muted); }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
 .swatch.unatt { outline: 1px dashed var(--unatt-stroke); outline-offset: -1px; }
 
+/* Now: the CPU & RAM card (display only), two GPU columns wide below the GPU cards */
+.box-wrap { margin-top: 10px; width: calc(50% - 5px); }
+@media (max-width: 1100px) { .box-wrap { width: 100%; } }
+.box-metrics { flex-wrap: wrap; align-items: baseline; margin-top: 6px; }
+.box-users .box-who { font-family: var(--sans); font-size: 12px; color: var(--text); }
+.box-users .mib { min-width: 5.5em; text-align: right; }
+.box-wrap .caveats { margin-top: 6px; }
+
 .slack-note { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
 .alerts { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13px; }
 .alerts li { padding: 4px 0; border-top: 1px solid var(--grid); display: flex; gap: 8px; }
@@ -197,6 +207,7 @@ svg .now-line { stroke: var(--now); stroke-width: 1.5; stroke-dasharray: 3 3; }
 svg text.now-label { fill: var(--now); font-weight: 600; }
 svg .bar-label { fill: #fff; font-size: 11px; pointer-events: none; }
 svg text.bar-label.on-unatt { fill: #1a1a19; }
+svg text.bar-label.on-idle { fill: var(--on-idle); }   /* labels on the grey "system" bars */
 svg rect.job { stroke: var(--panel); stroke-width: 1; }
 svg rect.job.unbooked { stroke: var(--danger); stroke-width: 2.5; stroke-dasharray: none; }
 svg rect.band { fill-opacity: 0.12; stroke: none; }
