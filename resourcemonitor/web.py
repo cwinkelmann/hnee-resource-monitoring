@@ -56,9 +56,13 @@ _CLAIM_ERRORS = {400: "invalid", 404: "not found", 409: "conflict"}
 
 
 class _RateLimiter:
-    """At most `limit` writes per client IP in any rolling `window_s` (in memory)."""
+    """At most `limit` writes per client IP in any rolling `window_s` (in memory).
 
-    def __init__(self, limit: int = 30, window_s: float = 3600):
+    The budget is per IP, and every client on carrot (and everything behind the
+    same NAT) shares one — so the limit is a backstop against a runaway loop,
+    not a per-user quota."""
+
+    def __init__(self, limit: int = 1000, window_s: float = 3600):
         self.limit = limit
         self.window_s = window_s
         self._hits: dict[str, deque] = {}
