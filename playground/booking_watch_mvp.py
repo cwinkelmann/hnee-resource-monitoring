@@ -52,13 +52,20 @@ def book(server: str, user: str, minutes: int, vram_gib: int | None) -> dict:
 
 
 def booking_state(server: str, claim_id: int) -> str:
-    """'standing', 'revoked' (cancelled or gone) or 'expired' (past its end)."""
+    """'standing', 'revoked' (cancelled or gone), 'taken' (an important booking
+    holds this booking's VRAM right now) or 'expired' (past its end)."""
     claims = _api(server, "/api/claims")["claims"]
     mine = next((c for c in claims if c["id"] == claim_id), None)
     if mine is None or mine["cancelled_at"] is not None:
         return "revoked"
-    if datetime.fromisoformat(mine["end"]) <= datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    if datetime.fromisoformat(mine["end"]) <= now:
         return "expired"
+    for seg in mine.get("taken", ()):
+        if datetime.fromisoformat(seg["start"]) <= now < datetime.fromisoformat(seg["end"]):
+            print(f"{seg['vram_mib']} MiB taken by {', '.join(seg['by'])} "
+                  f"until {seg['end']}", flush=True)
+            return "taken"
     return "standing"
 
 

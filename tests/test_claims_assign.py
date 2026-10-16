@@ -66,6 +66,13 @@ def test_an_explicit_start_still_conflicts_and_the_409_carries_the_offer(store):
     assert e.value.extra["free_now"] == CARD - 79 * 1024
 
 
+def test_an_explicit_start_accepts_a_duration_instead_of_an_end(store):
+    made = _assign(store, start=T0 + H)
+    assert made.booking.start == T0 + H
+    assert made.booking.end == T0 + 2 * H
+    assert made.assigned_later is False
+
+
 def test_not_later_than_fails_fast_instead_of_sleeping_for_a_fortnight(store):
     book(store, gpu=4, gib=79, start=T0, hours=10)
     with pytest.raises(ClaimError) as e:
