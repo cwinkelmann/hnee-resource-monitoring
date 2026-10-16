@@ -11,7 +11,7 @@ import pwd
 import re
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
@@ -108,18 +108,29 @@ class Booking:
 
 @dataclass(frozen=True)
 class Created:
-    """A new booking, the lendable bookings it takes from, and the start it asked for if the
-    grace period moved it (else None)."""
-    booking: Booking
+    """New bookings (one row, or every member of a group), the lendable bookings they take
+    from, the start that was asked for if grace moved it, whether the server had to assign
+    a later slot, and the bookings revoked to make room."""
+    bookings: list[Booking]
     takes: list[dict]
     adjusted_start: datetime | None = None
+    assigned_later: bool = False
+    revoked: list[dict] = field(default_factory=list)
+
+    @property
+    def booking(self) -> Booking:
+        """The first row. Every caller that predates group bookings uses this."""
+        return self.bookings[0]
 
 
 class ClaimError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, extra: dict | None = None):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        # Machine-readable detail for a 409: the earliest slot that would fit and how much
+        # is free now, so "book later or book less" is in the answer instead of guesswork.
+        self.extra = extra or {}
 
 
 class UserDirectory(Protocol):
@@ -199,19 +210,18 @@ def _validate_gpu(gpu: int) -> None:
         raise ClaimError(400, "GPU must be 0–7")
 
 
-def _validate(users: UserDirectory, user: str, gpu: int, vram_mib: int, start: datetime,
-              end: datetime, note: str | None, now: datetime, card_mib: int) -> str | None:
-    """Raise ClaimError(400) on the first broken rule; return the note to store."""
-    _validate_user(users, user)
-    _validate_gpu(gpu)
-    if vram_mib < MIB_PER_GIB or vram_mib > card_mib:
-        raise ClaimError(400, f"VRAM must be between 1 and {card_mib // MIB_PER_GIB} GiB")
+def _validate_window(start: datetime, end: datetime, now: datetime) -> None:
+    """The rules a window must satisfy. Split out of _validate because a window the server
+    assigned is checked after it is chosen, not before."""
     if end <= start:
         raise ClaimError(400, "end must be after start")
     if start < now - PAST_SLACK:
         raise ClaimError(400, "start lies in the past")
     if end - start > timedelta(days=MAX_DAYS):
         raise ClaimError(400, f"a booking may last at most {MAX_DAYS} days")
+
+
+def _validate_note(note: str | None) -> str | None:
     if note is None:
         return None
     if len(note) > NOTE_MAX:
@@ -219,6 +229,17 @@ def _validate(users: UserDirectory, user: str, gpu: int, vram_mib: int, start: d
     if any(ord(c) < 32 or 0x7F <= ord(c) <= 0x9F for c in note):
         raise ClaimError(400, "invalid note")
     return note if note.strip() else None
+
+
+def _validate(users: UserDirectory, user: str, gpu: int, vram_mib: int, start: datetime,
+              end: datetime, note: str | None, now: datetime, card_mib: int) -> str | None:
+    """Raise ClaimError(400) on the first broken rule; return the note to store."""
+    _validate_user(users, user)
+    _validate_gpu(gpu)
+    if vram_mib < MIB_PER_GIB or vram_mib > card_mib:
+        raise ClaimError(400, f"VRAM must be between 1 and {card_mib // MIB_PER_GIB} GiB")
+    _validate_window(start, end, now)
+    return _validate_note(note)
 
 
 def allocate(active: list[Booking], total_mib: int) -> dict[int, int]:
@@ -284,6 +305,15 @@ def takes_of(new: Booking, existing: list[Booking], total_mib: int) -> list[dict
                        ("vram_mib",))
     return sorted((s for segs in per.values() for s in segs),
                   key=lambda s: (s["start"], s["id"]))
+
+
+def _free_now(rows: list[Booking], cards: dict[int, int], gpu: int | None,
+              now: datetime) -> int:
+    """The most MiB free on one card at `now` -- what "book less" would have to fit into.
+    With gpu=None that is the best card, which is the number a floating booking cares about."""
+    from resourcemonitor.slots import booked_at
+    want = cards if gpu is None else {gpu: cards.get(gpu, DEFAULT_CARD_MIB)}
+    return max((max(mib - booked_at(rows, g, now), 0) for g, mib in want.items()), default=0)
 
 
 def _check_capacity(overlapping: list[Booking], gpu: int, vram_mib: int, start: datetime,
@@ -364,30 +394,96 @@ class ClaimsStore:
                 conn.execute("ROLLBACK")
             raise
 
-    def create(self, *, user: str, gpu: int, vram_mib: int, start: datetime, end: datetime,
-               note: str | None, ip: str, now: datetime,
-               card_mib: int = DEFAULT_CARD_MIB, priority: str = "lendable",
-               grace: timedelta = DEFAULT_GRACE) -> Created:
-        """Book, or raise ClaimError. An important booking that would squeeze a lendable
-        booking already under way starts no earlier than now + grace; the start it asked
-        for is then returned as adjusted_start."""
+    def create(self, *, user: str, gpu: int | None, vram_mib: int,
+               start: datetime | None, end: datetime | None, note: str | None, ip: str,
+               now: datetime, card_mib: int = DEFAULT_CARD_MIB,
+               priority: str = "lendable", grace: timedelta = DEFAULT_GRACE,
+               duration: timedelta | None = None, auto_advance: bool = False,
+               not_later_than: datetime | None = None,
+               cards: dict[int, int] | None = None) -> Created:
+        """Book, or raise ClaimError. With start=None the server assigns the earliest slot
+        that fits and the booking never fails for lack of capacity; with an explicit start
+        the old behaviour is kept exactly, 409 included. An important booking that would
+        squeeze a lendable booking already under way starts no earlier than now + grace.
+
+        Give exactly one of end and duration. gpu=None lets the server pick the card.
+        """
+        from resourcemonitor.slots import earliest_fit, earliest_fit_group
         if priority not in PRIORITIES:
             raise ClaimError(400, "priority must be lendable or important")
-        start, end, now = _utc(start), _utc(end), _utc(now)
-        note = _validate(self.users, user, gpu, vram_mib, start, end, note, now, card_mib)
-        asked = start
+        if (end is None) == (duration is None):
+            raise ClaimError(400, "give exactly one of end and duration")
+        now = _utc(now)
+        if duration is None:
+            duration = _utc(end) - _utc(start if start is not None else now)
+        if duration <= timedelta(0):
+            raise ClaimError(400, "end must be after start")
+        if duration > timedelta(days=MAX_DAYS):
+            raise ClaimError(400, f"a booking may last at most {MAX_DAYS} days")
+        cards = dict(cards) if cards else {g: card_mib for g in range(GPU_COUNT)}
+        _validate_user(self.users, user)
+        if gpu is not None:
+            _validate_gpu(gpu)
+            card_mib = cards.get(gpu, card_mib)
+        if vram_mib < MIB_PER_GIB or vram_mib > max(cards.values()):
+            raise ClaimError(400, "VRAM must be between 1 and "
+                                  f"{max(cards.values()) // MIB_PER_GIB} GiB")
+        note = _validate_note(note)
+        asked = None if start is None else _utc(start)
         with self._lock:
             conn = self._conn
             conn.execute("BEGIN IMMEDIATE")
             try:
-                overlapping = [_row(r) for r in conn.execute(
-                    f"SELECT {_COLUMNS} FROM claims WHERE gpu = ? AND cancelled_at IS NULL "
-                    "AND start < ? AND end > ?", (gpu, end.isoformat(), start.isoformat()))]
-                _check_capacity(overlapping, gpu, vram_mib, start, end, card_mib, priority)
+                if start is None:
+                    rows = [_row(r) for r in conn.execute(
+                        f"SELECT {_COLUMNS} FROM claims WHERE cancelled_at IS NULL "
+                        "AND end > ?", (now.isoformat(),))]
+                    # A lendable booking must fit beside every booking; an important one
+                    # only beside the important ones, exactly as _check_capacity has it --
+                    # otherwise "earliest" would queue an important booking behind the
+                    # lendable work it is entitled to take.
+                    fit_rows = rows if priority != "important" else \
+                        [b for b in rows if b.priority == "important"]
+                    hit = earliest_fit_group(fit_rows, 1, vram_mib, duration, cards, now,
+                                             gpus=None if gpu is None else [gpu])
+                    if hit is None:
+                        raise ClaimError(409, f"no slot fits within the next {MAX_DAYS} days",
+                                         {"earliest": None,
+                                          "free_now": _free_now(fit_rows, cards, gpu, now)})
+                    start, chosen = hit[0], hit[1][0]
+                    if not_later_than is not None and start > _utc(not_later_than):
+                        raise ClaimError(409, "the earliest slot is later than asked",
+                                         {"earliest": start.isoformat(),
+                                          "free_now": _free_now(fit_rows, cards, chosen, now)})
+                    gpu, card_mib = chosen, cards[chosen]
+                    end = start + duration
+                    assigned_later = start > now
+                    overlapping = [b for b in rows if b.gpu == gpu
+                                   and b.start < end and b.end > start]
+                else:
+                    start, end = asked, _utc(end)
+                    _validate_window(start, end, now)
+                    assigned_later = False
+                    overlapping = [_row(r) for r in conn.execute(
+                        f"SELECT {_COLUMNS} FROM claims WHERE gpu = ? "
+                        "AND cancelled_at IS NULL AND start < ? AND end > ?",
+                        (gpu, end.isoformat(), start.isoformat()))]
+                    try:
+                        _check_capacity(overlapping, gpu, vram_mib, start, end, card_mib,
+                                        priority)
+                    except ClaimError as e:
+                        if e.status != 409:
+                            raise
+                        fit = earliest_fit(overlapping, gpu, vram_mib, duration, card_mib,
+                                           now)
+                        raise ClaimError(409, e.detail, {
+                            "earliest": None if fit is None else fit.isoformat(),
+                            "free_now": _free_now(overlapping, cards, gpu, now)}) from None
 
                 def draft(s: datetime) -> Booking:
                     return Booking(id=0, user=user, gpu=gpu, vram_mib=vram_mib, start=s,
-                                   end=end, note=note, created_at=now, created_ip=ip,
+                                   end=s + duration if assigned_later or asked is None
+                                   else end, note=note, created_at=now, created_ip=ip,
                                    priority=priority)
                 takes = takes_of(draft(start), overlapping, card_mib) \
                     if priority == "important" else []
@@ -396,7 +492,16 @@ class ClaimsStore:
                     start = now + grace          # rounded up to the whole minute
                     if start.second or start.microsecond:
                         start = start.replace(second=0, microsecond=0) + timedelta(minutes=1)
-                    if end <= start:
+                    if asked is None:
+                        # An assigned window keeps the duration it asked for: the job wanted
+                        # an hour, not whatever is left of one. An explicit window keeps
+                        # today's behaviour and is simply shortened.
+                        end = start + duration
+                        _check_capacity([b for b in overlapping if b.priority == priority
+                                         or priority == "lendable"], gpu, vram_mib, start,
+                                        end, card_mib, priority)
+                        assigned_later = start > now
+                    elif end <= start:
                         raise ClaimError(409, "this takes from a lendable booking that is "
                                               "already running, so it must last beyond "
                                               f"{int(grace.total_seconds() // 60)} minutes "
@@ -404,9 +509,10 @@ class ClaimsStore:
                     takes = takes_of(draft(start), overlapping, card_mib)
                 cur = conn.execute(
                     "INSERT INTO claims (user, gpu, vram_mib, start, end, note, created_at, "
-                    "created_ip, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "created_ip, priority, auto_advance) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (user, gpu, vram_mib, start.isoformat(), end.isoformat(), note,
-                     now.isoformat(), ip, priority))
+                     now.isoformat(), ip, priority, int(auto_advance)))
                 claim_id = cur.lastrowid
                 conn.execute("COMMIT")
             except BaseException:
@@ -414,8 +520,11 @@ class ClaimsStore:
                     conn.execute("ROLLBACK")
                 raise
         booking = Booking(id=claim_id, user=user, gpu=gpu, vram_mib=vram_mib, start=start,
-                          end=end, note=note, created_at=now, created_ip=ip, priority=priority)
-        return Created(booking, takes, asked if start != asked else None)
+                          end=end, note=note, created_at=now, created_ip=ip,
+                          priority=priority, auto_advance=auto_advance)
+        return Created([booking], takes,
+                       asked if asked is not None and start != asked else None,
+                       assigned_later)
 
     def quick(self, *, user: str | None, gpu: int, ip: str, now: datetime,
               card_mib: int = DEFAULT_CARD_MIB) -> Booking | None:
