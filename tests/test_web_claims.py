@@ -628,3 +628,88 @@ def test_an_unknown_field_is_still_rejected(live):
     status, _, _ = _post(live + "/api/claims",
                          dict(_booking(), surprise=1))
     assert status == 400
+
+
+def _get_status(url):
+    """Like _post, but a GET: the status matters as much as the body here."""
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def _claim_id(live, **over):
+    return json.loads(_post(live + "/api/claims", _booking(**over))[2])["claim"]["id"]
+
+
+def test_release_truncates_and_reports_nothing_advanced(live):
+    cid = _claim_id(live, start=None, end=None, duration_minutes=240, vram_gib=79)
+    status, _, body = _post(f"{live}/api/claims/{cid}/release", {})
+    assert status == 200
+    d = json.loads(body)
+    assert d["claim"]["cancelled_at"] is None
+    assert d["advanced"] == []
+
+
+def test_release_reports_the_slot_it_pulled_earlier(live):
+    blocker = _claim_id(live, start=None, end=None, duration_minutes=240, vram_gib=79)
+    waiting = json.loads(_post(live + "/api/claims", _booking(
+        user="cwinkelmann", gpu=4, vram_gib=79, start=None, end=None,
+        duration_minutes=60, auto_advance=True))[2])["claim"]
+    status, _, body = _post(f"{live}/api/claims/{blocker}/release", {})
+    assert status == 200
+    advanced = json.loads(body)["advanced"]
+    assert [a["id"] for a in advanced] == [waiting["id"]]
+    assert advanced[0]["new_start"] < waiting["start"]
+
+
+def test_release_accepts_an_explicit_end(live):
+    cid = _claim_id(live, start=S, end=E)
+    status, _, body = _post(f"{live}/api/claims/{cid}/release",
+                            {"end": "2026-10-06T15:00:00+02:00"})
+    assert status == 200
+    assert json.loads(body)["claim"]["end"] == "2026-10-06T13:00:00+00:00"
+
+
+def test_releasing_an_unknown_booking_is_404(live):
+    status, _, _ = _post(f"{live}/api/claims/999999/release", {})
+    assert status == 404
+
+
+def test_release_rejects_an_unknown_field(live):
+    cid = _claim_id(live, start=S, end=E)
+    status, _, _ = _post(f"{live}/api/claims/{cid}/release", {"when": "now"})
+    assert status == 400
+
+
+def test_release_is_a_post_only_route(live):
+    cid = _claim_id(live, start=S, end=E)
+    status, _, _ = _get_status(f"{live}/api/claims/{cid}/release")
+    assert status in (404, 405)
+
+
+def test_capacity_answers_free_now_and_the_earliest_fit(live):
+    _post(live + "/api/claims", _booking(vram_gib=79, start=S, end=E))
+    status, _, body = _get_status(live + "/api/capacity?gpu=4&vram_gib=79&duration_minutes=60")
+    assert status == 200
+    d = json.loads(body)
+    assert d["gpu"] == 4
+    assert d["free_mib"] < 79 * 1024
+    assert d["earliest"] is not None
+
+
+def test_capacity_without_a_gpu_considers_every_card(live):
+    status, _, body = _get_status(live + "/api/capacity?vram_gib=20&duration_minutes=60")
+    assert status == 200
+    d = json.loads(body)
+    assert d["gpu"] is not None
+    assert d["earliest"] is not None
+
+
+def test_capacity_rejects_rubbish(live):
+    for q in ("?gpu=nine", "?vram_gib=-1", "?duration_minutes=0", "?count=99",
+              "?surprise=1"):
+        status, _, _ = _get_status(live + "/api/capacity" + q)
+        assert status == 400

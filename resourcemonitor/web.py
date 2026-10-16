@@ -47,8 +47,10 @@ MAX_BODY = 4096
 _DRAIN_MAX = 64 * 1024                          # unread body bytes swallowed before a rejection
 _DRAIN_TIMEOUT_S = 1
 _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
+_RELEASE = re.compile(r"^/api/claims/(\d{1,9})/release$", re.ASCII)
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
-                                 "/api/vram", "/api/timeline", "/api/users", "/healthz"}
+                                 "/api/vram", "/api/timeline", "/api/users", "/healthz",
+                                 "/api/capacity"}
 _CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note", "priority",
                  "auto_advance", "duration_minutes", "not_later_than", "count",
                  "notice_seconds")
@@ -188,6 +190,7 @@ class _Handler(BaseHTTPRequestHandler):
                        "/api/timeseries": self._timeseries, "/api/vram": self._vram,
                        "/api/timeline": self._timeline,
                        "/api/claims": self._claims, "/api/users": self._users,
+                       "/api/capacity": self._capacity,
                        "/healthz": self._healthz}.get(path)
             if handler is None:
                 self._json(404, {"error": "not found"})
@@ -223,7 +226,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._method_not_allowed()
             return
         m = _CANCEL.match(path)
-        if path not in ("/api/claims", _QUICK) and m is None:
+        m_release = _RELEASE.match(path)
+        if path not in ("/api/claims", _QUICK) and m is None and m_release is None:
             self._drain()
             self._json(404, {"error": "not found"})
             return
@@ -235,6 +239,10 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(200, {"claim": None})
                 else:
                     self._json(201, {"claim": claim.to_json()})
+            elif m_release is not None:
+                out = self._release(int(m_release.group(1)), body)
+                self._json(200, {"claim": out.booking.to_json(),
+                                 "advanced": out.advanced})
             elif m is None:
                 made = self._create(body)
                 self._json(201, {
@@ -385,6 +393,51 @@ class _Handler(BaseHTTPRequestHandler):
         except (NoHistory, sqlite3.Error):
             pass
         return cards or {g: DEFAULT_CARD_MIB for g in range(GPU_COUNT)}
+
+    def _release(self, claim_id: int, d: dict):
+        """Truncate a booking that is under way, or cancel one that has not started."""
+        if set(d) - {"end"}:
+            raise ClaimError(400, "unknown field")
+        raw = d.get("end")
+        if raw is not None and not isinstance(raw, str):
+            raise ClaimError(400, "missing or invalid field 'end'")
+        end = None if raw in (None, "now") else parse_time(raw)
+        return self._store().release(claim_id, end=end, ip=self.client_address[0],
+                                     now=self.server.clock(), cards=self._cards())
+
+    def _capacity(self, query: str) -> None:
+        """The one authoritative capacity answer: what fits now, and when this shape fits.
+        It exists because clients were re-implementing the VRAM sum and getting it wrong."""
+        from resourcemonitor.slots import booked_at, earliest_fit_group
+        p = _params(query, {"gpu", "vram_gib", "duration_minutes", "count"})
+        cards = self._cards()
+        gpu = None
+        if "gpu" in p:
+            if not p["gpu"].isdigit() or int(p["gpu"]) not in cards:
+                raise ClaimError(400, "GPU must be 0–7")
+            gpu = int(p["gpu"])
+        try:
+            vram_gib = float(p.get("vram_gib", "1"))
+            minutes = int(p.get("duration_minutes", "60"))
+            count = int(p.get("count", "1"))
+        except ValueError:
+            raise ClaimError(400, "invalid query")
+        if not (math.isfinite(vram_gib) and vram_gib > 0) or not 1 <= minutes \
+                <= MAX_DURATION_MIN or not 1 <= count <= GPU_COUNT:
+            raise ClaimError(400, "invalid query")
+        vram_mib = round(vram_gib * MIB_PER_GIB)
+        now = self.server.clock()
+        rows = list_window_ro(self.server.claims_path, now)
+        live = [b for b in rows if b.cancelled_at is None and b.end > now]
+        hit = earliest_fit_group(live, count, vram_mib, timedelta(minutes=minutes), cards,
+                                 now, gpus=None if gpu is None else [gpu])
+        want = cards if gpu is None else {gpu: cards[gpu]}
+        free = max((mib - booked_at(live, g, now) for g, mib in want.items()), default=0)
+        self._json(200, {"free_mib": max(free, 0),
+                         "free_gib": round(max(free, 0) / MIB_PER_GIB, 1),
+                         "earliest": None if hit is None else hit[0].isoformat(),
+                         "gpu": None if hit is None else hit[1][0],
+                         "gpus": [] if hit is None else hit[1]})
 
     def _grace(self) -> timedelta:
         """booking.grace_minutes from policy.toml; the default if the file is missing or bad."""
