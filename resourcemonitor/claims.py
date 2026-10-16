@@ -24,7 +24,7 @@ MAX_DAYS = 14
 PAST_SLACK = timedelta(minutes=5)
 NOTE_MAX = 120
 GPU_COUNT = 8
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 QUICK_RESET_HOUR = 9
 QUICK_TZ = "Europe/Berlin"
 QUICK_NOTE = "quick booking"
@@ -50,19 +50,23 @@ CREATE TABLE IF NOT EXISTS claims (
   cancelled_at TEXT,
   cancelled_ip TEXT,
   kind         TEXT    NOT NULL DEFAULT 'calendar',
-  priority     TEXT    NOT NULL DEFAULT 'important'
+  priority     TEXT    NOT NULL DEFAULT 'important',
+  auto_advance INTEGER NOT NULL DEFAULT 0,
+  group_id     TEXT,
+  notice_seconds INTEGER
 );
 CREATE INDEX IF NOT EXISTS claims_gpu_window ON claims(gpu, start, end);
 """
 
 _COLUMNS_V1 = ("id, user, gpu, vram_mib, start, end, note, created_at, created_ip, "
                "cancelled_at, cancelled_ip")
-_COLUMNS = _COLUMNS_V1 + ", kind, priority"
-# Older files read before the web process migrated them: version 1 has no kind (all
-# calendar), version 2 no priority. Rows from before priorities existed blocked everyone,
-# so they read as important.
-_COLUMNS_V2_AS_V3 = _COLUMNS_V1 + ", kind, 'important'"
-_COLUMNS_V1_AS_V3 = _COLUMNS_V1 + ", 'calendar', 'important'"
+_COLUMNS = _COLUMNS_V1 + ", kind, priority, auto_advance, group_id, notice_seconds"
+# Older files read before the web process migrated them: v1 has no kind (all calendar),
+# v2 no priority, v3 none of the assignment columns. Rows from before priorities existed
+# blocked everyone, so they read as important; rows from before assignment never move.
+_COLUMNS_V3_AS_V4 = _COLUMNS_V1 + ", kind, priority, 0, NULL, NULL"
+_COLUMNS_V2_AS_V4 = _COLUMNS_V1 + ", kind, 'important', 0, NULL, NULL"
+_COLUMNS_V1_AS_V4 = _COLUMNS_V1 + ", 'calendar', 'important', 0, NULL, NULL"
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,9 @@ class Booking:
     cancelled_ip: str | None = None
     kind: str = "calendar"                  # "calendar" (the form) or "quick" (a card's holder)
     priority: str = "lendable"              # "lendable" or "important"
+    auto_advance: bool = False              # may this booking move earlier by itself?
+    group_id: str | None = None             # members of one atomic group share it
+    notice_seconds: int | None = None       # warning this owner needs; None: nobody listens
 
     def active_at(self, t: datetime) -> bool:
         return self.cancelled_at is None and self.start <= t < self.end
@@ -94,6 +101,8 @@ class Booking:
             "created_at": iso(self.created_at), "created_ip": self.created_ip,
             "cancelled_at": iso(self.cancelled_at), "cancelled_ip": self.cancelled_ip,
             "kind": self.kind, "priority": self.priority,
+            "auto_advance": self.auto_advance, "group_id": self.group_id,
+            "notice_seconds": self.notice_seconds,
         }
 
 
@@ -174,7 +183,8 @@ def _row(r: tuple) -> Booking:
     return Booking(id=r[0], user=r[1], gpu=r[2], vram_mib=r[3], start=_ts(r[4]),
                    end=_ts(r[5]), note=r[6], created_at=_ts(r[7]), created_ip=r[8],
                    cancelled_at=_ts(r[9]), cancelled_ip=r[10], kind=r[11],
-                   priority=r[12])
+                   priority=r[12], auto_advance=bool(r[13]), group_id=r[14],
+                   notice_seconds=r[15])
 
 
 def _validate_user(users: UserDirectory, user: str) -> None:
@@ -323,8 +333,12 @@ class ClaimsStore:
     def _migrate(self) -> None:
         """Version 1 -> 2 adds claims.kind; existing rows become 'calendar'. 2 -> 3 adds
         claims.priority; existing rows become 'important', since they were made when every
-        booking blocked others. One transaction, and each column is checked first, so a
-        half-done or repeated run is harmless."""
+        booking blocked others. 3 -> 4 adds the assignment columns: auto_advance (may this
+        booking move earlier by itself), group_id (members of one atomic group) and
+        notice_seconds (the warning its owner needs before losing the card); existing rows
+        get 0 and NULL, which is exactly how a booking made in the browser behaves.
+        One transaction, and each column is checked first, so a half-done or repeated run
+        is harmless."""
         conn = self._conn
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -336,6 +350,13 @@ class ClaimsStore:
                 if "priority" not in cols:
                     conn.execute("ALTER TABLE claims ADD COLUMN priority TEXT NOT NULL "
                                  "DEFAULT 'important'")
+                if "auto_advance" not in cols:
+                    conn.execute("ALTER TABLE claims ADD COLUMN auto_advance INTEGER "
+                                 "NOT NULL DEFAULT 0")
+                if "group_id" not in cols:
+                    conn.execute("ALTER TABLE claims ADD COLUMN group_id TEXT")
+                if "notice_seconds" not in cols:
+                    conn.execute("ALTER TABLE claims ADD COLUMN notice_seconds INTEGER")
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except BaseException:
@@ -503,8 +524,9 @@ def _read_ro(path: Path | str, where: str, params: tuple) -> list[Booking]:
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
         try:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
-            select = (_COLUMNS if "priority" in cols else
-                      _COLUMNS_V2_AS_V3 if "kind" in cols else _COLUMNS_V1_AS_V3)
+            select = (_COLUMNS if "notice_seconds" in cols else
+                      _COLUMNS_V3_AS_V4 if "priority" in cols else
+                      _COLUMNS_V2_AS_V4 if "kind" in cols else _COLUMNS_V1_AS_V4)
             rows = conn.execute(f"SELECT {select} FROM claims {where}", params).fetchall()
         finally:
             conn.close()

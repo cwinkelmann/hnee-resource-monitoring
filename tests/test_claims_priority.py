@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from resourcemonitor.claims import (Booking, ClaimError, ClaimsStore, allocate, load_active,
+from resourcemonitor.claims import (SCHEMA_VERSION, Booking, ClaimError, ClaimsStore,
+                                    allocate, load_active,
                                     taken_segments, takes_of)
 from tests.claims_fixture import T0, FakeUsers
 
@@ -241,7 +242,7 @@ def test_v2_rows_read_as_important_before_and_after_migration(tmp_path):
     s = ClaimsStore(path, users=FakeUsers())
     try:
         assert [b.priority for b in s.list_window(T0)] == ["important"]
-        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         c = mk(s, user="cwinkelmann", gib=10, start=T0)
         assert c.booking.priority == "lendable"
     finally:
