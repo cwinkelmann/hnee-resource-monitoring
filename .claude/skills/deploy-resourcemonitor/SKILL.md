@@ -39,10 +39,20 @@ Asking root for a uid→name table does not help — the UID is destroyed before
    rsync -a --exclude .git --exclude __pycache__ ./ cwinkelmann@10.188.1.1:~/ResourceMonitor/
    ```
 
-2. **Policy** — `~/.config/resourcemonitor/policy.toml`, from `deploy/policy.example.toml`.
+2. **Host config** — `~/.config/resourcemonitor/host.env`, from `deploy/host.env.example`
+   (mode 0644; it holds no secret). Set `RESOURCEMONITOR_BIND` to this machine's LAN
+   address: carrot `10.188.1.1`, olive `10.188.2.1`, t14 `192.168.188.88`. Unset means
+   loopback only. Every unit starts `deploy/run-resourcemonitor.sh`, which reads this file
+   and picks the interpreter (conda env if present, else `python3`), so one unit file fits
+   every host. Hosts other than carrot: check `loginctl show-user $(id -un) -p Linger` —
+   with `Linger=no` a user unit dies when your SSH session closes, and
+   `sudo loginctl enable-linger` needs root. Use `deploy/resourcemonitor-guard.sh` from
+   cron on such a host until linger is enabled.
+
+3. **Policy** — `~/.config/resourcemonitor/policy.toml`, from `deploy/policy.example.toml`.
    The `[assignments]` keys are OS usernames exactly as `/proc` reports them.
 
-3. **Webhook secret** — mode 0600, never committed:
+4. **Webhook secret** — mode 0600, never committed:
 
    ```bash
    read -rs URL        # paste the URL here; never type it inline on a command line
@@ -54,17 +64,17 @@ Asking root for a uid→name table does not help — the UID is destroyed before
    The secret travels over stdin, so it never appears in argv (`ps`) or shell history, and
    `$URL` is expanded locally, not inside the remote command.
 
-4. **Dry run first, and read the output.**
+5. **Dry run first, and read the output.**
 
    ```bash
    ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && ~/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor once'
    ```
 
    It prints the Slack payload instead of sending it. Confirm the alerts are ones you
-   would have wanted to receive. Leave it dry for a day before step 6 — the cost of a
+   would have wanted to receive. Leave it dry for a day before step 7 — the cost of a
    noisy first week is that the channel gets muted and the tool becomes useless.
 
-5. **Dry soak (writes history, never posts)** — leave this running while you watch the output:
+6. **Dry soak (writes history, never posts)** — leave this running while you watch the output:
 
    ```bash
    ssh cwinkelmann@10.188.1.1 'systemd-run --user --unit=resourcemonitor-soak --working-directory=/home/cwinkelmann/ResourceMonitor -p Restart=always -p RestartSec=30 -E PYTHONUNBUFFERED=1 /home/cwinkelmann/miniconda3/envs/resourcemonitor/bin/python -m resourcemonitor watch --interval 60'
@@ -73,7 +83,7 @@ Asking root for a uid→name table does not help — the UID is destroyed before
    No `--post`. The dashboard only gets new data while either this soak or the real unit
    is running `watch`: history is written by `watch`, never by `serve`.
 
-6. **Enable the unit**
+7. **Enable the unit**
 
    Before enabling, stop any dry-run transient unit and remove its state to avoid cooldowns silencing real incidents:
 
@@ -89,7 +99,7 @@ Asking root for a uid→name table does not help — the UID is destroyed before
      systemctl --user enable --now resourcemonitor'
    ```
 
-7. **Verify**
+8. **Verify**
 
    ```bash
    ssh cwinkelmann@10.188.1.1 'systemctl --user status resourcemonitor --no-pager | head -20'

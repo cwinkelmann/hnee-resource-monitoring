@@ -17,7 +17,7 @@ Energy is also tracked (see Energy below). Unknown owners are reported as unknow
 
 | fact | consequence |
 |---|---|
-| Services run in the `resourcemonitor` conda env (user's choice) | stdlib only; units hardcode `%h/miniconda3/envs/resourcemonitor/bin/python`. If the env is removed or renamed the monitor stops: `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest` |
+| Services run in the `resourcemonitor` conda env (user's choice) | stdlib only; `deploy/run-resourcemonitor.sh` takes that env when it exists and falls back to `python3`, so a host without conda (the t14) still runs. Recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest` |
 | `systemd --user` works, `Linger=yes` | runs as a user service, no root |
 | Docker is rootless; `dorian.zwanzig` is UID 1053, outside `cwinkelmann`'s subuid range | **cannot run in a rootless container**: inside, `/proc/<pid>` shows `uid=65534 nobody` for other users, so attribution is destroyed |
 | `nvidia-smi` reports PIDs only | owner comes from `/proc` |
@@ -42,6 +42,12 @@ the payloads. Options: `--policy`, `--state`, `--energy`, `--interval`, `--price
 
 ## Setup
 
+1. Copy `deploy/host.env.example` to `~/.config/resourcemonitor/host.env` and set this
+   machine's bind address (`carrot` 10.188.1.1, `olive` 10.188.2.1, `t14` 192.168.188.88).
+   Without it the dashboard binds 127.0.0.1 only, so a new host is never exposed by accident.
+   The units are host-agnostic: they all start `deploy/run-resourcemonitor.sh`, which reads
+   this file. systemd cannot take `ExecStart`'s executable from a variable, which is why the
+   wrapper exists at all.
 1. Copy `deploy/policy.example.toml` to `~/.config/resourcemonitor/policy.toml` and edit.
 2. Webhook: put `SLACK_WEBHOOK_URL=...` in `~/.config/resourcemonitor/env` (mode 0600).
    The URL is a bearer credential: never commit or log it, and never put it in a command line
