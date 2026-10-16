@@ -61,6 +61,12 @@
           <input id="book-until" name="end" type="datetime-local" step="60" aria-label="until (custom)" hidden>
           <span id="book-until-text" class="muted"></span>
         </div>
+        <span class="label">when</span>
+        <label class="check" for="book-earliest"><input id="book-earliest" name="earliest" type="checkbox"> Earliest slot</label>
+        <label for="book-duration">for (minutes)</label>
+        <input id="book-duration" name="duration_minutes" type="number" min="1" max="20160" step="1" placeholder="60" inputmode="numeric">
+        <label class="check" for="book-advance"><input id="book-advance" name="auto_advance" type="checkbox"> Move earlier if a card frees up</label>
+
         <span class="label">priority</span>
         <label class="check" for="book-important"><input id="book-important" name="important" type="checkbox"> Important</label>
         <p id="book-priority-hint" class="hint priority-hint">Others can't take an important booking. A lendable one can be partly taken by an important booking, with 30 minutes' notice.</p>

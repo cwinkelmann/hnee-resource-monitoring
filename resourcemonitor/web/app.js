@@ -99,6 +99,16 @@ function makeDebouncer(delayMs, deliver, schedule, cancel) {
 }
 // VRAM panel stacking order: users alphabetically, "(unattributed)" last; only buckets that
 // held some VRAM in `points` ([{by_user: {bucket: mib}}]).
+// Which of the four states a booking is in. An "assigned" booking has not started: the
+// server chose its window, and an early release by someone else may still move it earlier.
+function bookingState(claim, nowMs) {
+  if (claim.cancelled_at) return "cancelled";
+  const start = Date.parse(claim.start), end = Date.parse(claim.end);
+  if (end <= nowMs) return "over";
+  if (start <= nowMs) return "running";
+  return "assigned";
+}
+
 function vramBucketOrder(points) {
   const seen = new Set();
   for (const p of points) for (const b in p.by_user) if (p.by_user[b] > 0) seen.add(b);
@@ -885,6 +895,14 @@ if (typeof document !== "undefined") (function () {
     return { from: from, until: until };
   }
   function formPriority() { return $("book-important").checked ? "important" : "lendable"; }
+  // "Earliest slot" means the server picks the window, so the from/until fields stop being
+  // required (the browser would otherwise refuse to submit the form).
+  function syncEarliest() {
+    const earliest = $("book-earliest").checked;
+    $("book-from").required = !earliest;
+    $("book-duration").disabled = !earliest;
+    $("book-advance").disabled = !earliest;
+  }
   // Free for the chosen priority: unbooked (all bookings) for lendable, not booked as
   // important for important.
   function windowFree(gpu, w) {
@@ -987,16 +1005,26 @@ if (typeof document !== "undefined") (function () {
   async function submitBooking(ev) {
     ev.preventDefault();
     if (state.booking) return;
+    const earliest = $("book-earliest").checked;
     const w = formWindow();
     const user = $("book-user").value;
     const note = $("book-note").value.trim();
     $("book-ok").hidden = true;
     if (!user) { showBookError("Pick your user name first."); return; }
-    if (isNaN(w.from) || isNaN(w.until)) { showBookError("Pick when the booking starts and ends."); return; }
-    const payload = {
-      user: user, gpu: Number($("book-gpu").value),
-      start: isoWithOffset(new Date(w.from)), end: isoWithOffset(new Date(w.until)),
-    };
+    if (!earliest && (isNaN(w.from) || isNaN(w.until))) {
+      showBookError("Pick when the booking starts and ends."); return;
+    }
+    const payload = { user: user, gpu: Number($("book-gpu").value) };
+    if (earliest) {
+      // No start and no end: the server assigns the earliest window that fits.
+      const minutes = Number($("book-duration").value || 60);
+      if (!(minutes >= 1)) { showBookError("How many minutes should the booking last?"); return; }
+      payload.duration_minutes = minutes;
+      if ($("book-advance").checked) payload.auto_advance = true;
+    } else {
+      payload.start = isoWithOffset(new Date(w.from));
+      payload.end = isoWithOffset(new Date(w.until));
+    }
     const vram = $("book-vram").value;
     if (vram) payload.vram_gib = Number(vram);  // omitted: the server books the whole card
     if (note) payload.note = note;
@@ -1012,6 +1040,10 @@ if (typeof document !== "undefined") (function () {
     const ok = $("book-ok");
     let text = "Booked GPU " + c.gpu + ", " + gibText(c.vram_mib) + " GiB (" + priorityOf(c) + ") for "
       + c.user + " until " + fmtWhen(new Date(c.end)) + ".";
+    if (res.body.assigned_later) {
+      text += " It starts " + fmtWhen(new Date(c.start)) + ", the earliest slot that fits"
+        + ($("book-advance").checked ? ", and will move earlier if a card frees up." : ".");
+    }
     if (res.body.adjusted_start) {
       text += " The start moved from " + fmtWhen(new Date(res.body.adjusted_start)) + " to "
         + fmtWhen(new Date(c.start)) + " to give a running lendable booking "
@@ -1025,6 +1057,8 @@ if (typeof document !== "undefined") (function () {
     ok.hidden = false;
     $("book-note").value = "";
     $("book-important").checked = false;          // important is opt-in, per booking
+    $("book-earliest").checked = false;
+    syncEarliest();
     state.selectedClaim = c.id;
     state.cancelArmed = null;
     loadClaims();
@@ -1174,6 +1208,11 @@ if (typeof document !== "undefined") (function () {
     box.appendChild(head);
     const dl = el("dl");
     detailRow(dl, "window", fmtLocal(new Date(c.start)) + " – " + fmtLocal(new Date(c.end)));
+    const st = bookingState(c, Date.now());
+    detailRow(dl, "state", st === "assigned"
+      ? (c.auto_advance ? "assigned — not started; moves earlier if a card frees up"
+         : "assigned — not started")
+      : st);
     detailRow(dl, "priority", priorityOf(c) === "important" ? "important — others can't take it"
       : "lendable — an important booking can take part of it");
     for (const seg of c.taken || []) detailRow(dl, "taken", takenText(seg));
@@ -1247,6 +1286,8 @@ if (typeof document !== "undefined") (function () {
 
   function bindBookingForm() {
     $("book-form").addEventListener("submit", submitBooking);
+    $("book-earliest").addEventListener("change", syncEarliest);
+    syncEarliest();
     $("book-user").addEventListener("change", () => { if ($("book-user").value) storeUser($("book-user").value); });
     $("book-gpu").addEventListener("change", renderPreview);
     $("book-important").addEventListener("change", () => { renderGpuOptions(); renderPreview(); });
