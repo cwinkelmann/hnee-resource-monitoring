@@ -508,6 +508,7 @@ class ClaimsStore:
                     assigned_later = start > now
                     overlapping = [b for b in rows if b.gpu == gpu
                                    and b.start < end and b.end > start]
+                    snapshot = rows
                 else:
                     group_gpus = [gpu]
                     start = asked
@@ -518,6 +519,7 @@ class ClaimsStore:
                         f"SELECT {_COLUMNS} FROM claims WHERE gpu = ? "
                         "AND cancelled_at IS NULL AND start < ? AND end > ?",
                         (gpu, end.isoformat(), start.isoformat()))]
+                    snapshot = overlapping
                     try:
                         _check_capacity(overlapping, gpu, vram_mib, start, end, card_mib,
                                         priority)
@@ -590,6 +592,17 @@ class ClaimsStore:
                                         created_at=now, created_ip=ip, priority=priority,
                                         auto_advance=auto_advance, group_id=group_id,
                                         notice_seconds=notice_seconds))
+                revoked: list[dict] = []
+                for m in made:
+                    revoked += self._revoke(
+                        conn, booking_row=m, card_mib=cards.get(m.gpu, card_mib),
+                        overlapping=[b for b in snapshot if b.gpu == m.gpu
+                                     and b.id != m.id and b.start < m.end
+                                     and b.end > m.start])
+                if any(r["truncated"] for r in revoked):
+                    # The freed tail is capacity like any other: whoever is waiting for it
+                    # moves up, inside this same transaction.
+                    self._advance(conn, now, cards)
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
@@ -597,7 +610,7 @@ class ClaimsStore:
                 raise
         return Created(made, takes,
                        asked if asked is not None and start != asked else None,
-                       assigned_later)
+                       assigned_later, revoked)
 
     def _advance(self, conn, now: datetime, cards: dict[int, int]) -> list[dict]:
         """Move every advanceable booking to the earliest slot that now fits, re-reading
@@ -642,6 +655,43 @@ class ClaimsStore:
                               "new_start": new_start.isoformat()})
             rows = timeline()
         return moved
+
+    def _revoke(self, conn, *, booking_row: Booking, overlapping: list[Booking],
+                card_mib: int) -> list[dict]:
+        """Write down what this important booking takes. allocate() already decided it:
+        important bookings get their full VRAM and lendable ones split what is left,
+        oldest id first, so the newest lendable booking is the one that starves. A victim
+        left with nothing has its end truncated to the instant it loses the card -- the
+        window it really used stays on the calendar, exactly as an early release. A victim
+        merely shrunk keeps its row and is only told.
+
+        "Left with nothing" means left with less than MIB_PER_GIB: 79 GiB taken from a
+        79 GiB booking on an 81559 MiB card leaves a 663 MiB crumb, not a clean zero, and
+        a share below the smallest bookable amount cannot run anything -- leaving that row
+        on the calendar would block the card for the rest of its window for no one.
+
+        Only a booking active at that instant is ever touched, so end can never fall below
+        start, and `end > ?` makes a repeat harmless."""
+        if booking_row.priority != "important":
+            return []
+        at = booking_row.start
+        live = [b for b in overlapping if b.cancelled_at is None and b.active_at(at)]
+        after = allocate(live + [booking_row], card_mib)
+        out: list[dict] = []
+        for v in sorted((b for b in live if b.priority != "important"), key=lambda b: b.id):
+            effective = after.get(v.id, v.vram_mib)
+            if effective >= v.vram_mib:
+                continue
+            truncated = False
+            if effective < MIB_PER_GIB:
+                cur = conn.execute("UPDATE claims SET end = ? WHERE id = ? AND end > ?",
+                                   (at.isoformat(), v.id, at.isoformat()))
+                truncated = cur.rowcount > 0
+            out.append({"id": v.id, "user": v.user, "gpu": v.gpu,
+                        "effective_mib": effective, "lost_mib": v.vram_mib - effective,
+                        "at": at.isoformat(), "by": [booking_row.user],
+                        "truncated": truncated})
+        return out
 
     def release(self, claim_id: int, *, end: datetime | None, ip: str, now: datetime,
                 cards: dict[int, int] | None = None) -> Released:
