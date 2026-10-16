@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
 
 DEFAULT_CLAIMS = Path.home() / ".local/state/resourcemonitor/claims.sqlite"
@@ -418,7 +418,8 @@ class ClaimsStore:
                duration: timedelta | None = None, auto_advance: bool = False,
                not_later_than: datetime | None = None, count: int = 1,
                cards: dict[int, int] | None = None,
-               max_pending: int | None = None) -> Created:
+               max_pending: int | None = None, notice_seconds: int | None = None,
+               watching: Callable[[int], bool] = lambda _id: False) -> Created:
         """Book, or raise ClaimError. With start=None the server assigns the earliest slot
         that fits and the booking never fails for lack of capacity; with an explicit start
         the old behaviour is kept exactly, 409 included. An important booking that would
@@ -426,12 +427,20 @@ class ClaimsStore:
 
         Give exactly one of end and duration. gpu=None lets the server pick the card.
         count > 1 books that many cards atomically: one group_id, one shared start.
+
+        notice_seconds is the warning *this* booking's owner promises to need before giving
+        up its card; `watching` answers whether a given booking id has a live watcher, and
+        is consulted about this booking's victims.
         """
         from resourcemonitor.slots import earliest_fit, earliest_fit_group
         if priority not in PRIORITIES:
             raise ClaimError(400, "priority must be lendable or important")
         if (end is None) == (duration is None):
             raise ClaimError(400, "give exactly one of end and duration")
+        if notice_seconds is not None and (not isinstance(notice_seconds, int)
+                                           or isinstance(notice_seconds, bool)
+                                           or notice_seconds < 0):
+            raise ClaimError(400, "notice_seconds must be 0 or more")
         if not _is_count(count):
             raise ClaimError(400, "count must be a whole number of GPUs, 1 or more")
         if count > GPU_COUNT:
@@ -501,7 +510,8 @@ class ClaimsStore:
                                    and b.start < end and b.end > start]
                 else:
                     group_gpus = [gpu]
-                    start, end = asked, _utc(end)
+                    start = asked
+                    end = start + duration if end is None else _utc(end)
                     _validate_window(start, end, now)
                     assigned_later = False
                     overlapping = [_row(r) for r in conn.execute(
@@ -527,9 +537,25 @@ class ClaimsStore:
                                    priority=priority)
                 takes = takes_of(draft(start), overlapping, card_mib) \
                     if priority == "important" else []
-                running = {b.id for b in overlapping if b.start <= now}
-                if any(t["id"] in running and t["start"] < now + grace for t in takes):
-                    start = now + grace          # rounded up to the whole minute
+                running = {b.id: b for b in overlapping if b.start <= now}
+                victims = {t["id"] for t in takes if t["id"] in running}
+
+                def notice_of(v: Booking) -> timedelta:
+                    """A victim that is being listened to may shorten the wait to what it
+                    declared; it can never lengthen it past the policy grace, or a job
+                    could make itself unpreemptable by asking for a day's notice. A victim
+                    whose watcher has gone is treated as unwatched: a stale promise must
+                    not fake a response nobody is there to give."""
+                    if v.notice_seconds is None or not watching(v.id):
+                        return grace
+                    return min(timedelta(seconds=v.notice_seconds), grace)
+
+                notice = max((notice_of(running[i]) for i in victims),
+                             default=timedelta(0))
+                if notice > timedelta(0) and any(t["id"] in victims
+                                                 and t["start"] < now + notice
+                                                 for t in takes):
+                    start = now + notice         # rounded up to the whole minute
                     if start.second or start.microsecond:
                         start = start.replace(second=0, microsecond=0) + timedelta(minutes=1)
                     if asked is None:
@@ -544,7 +570,7 @@ class ClaimsStore:
                     elif end <= start:
                         raise ClaimError(409, "this takes from a lendable booking that is "
                                               "already running, so it must last beyond "
-                                              f"{int(grace.total_seconds() // 60)} minutes "
+                                              f"{int(notice.total_seconds() // 60)} minutes "
                                               "from now")
                     takes = takes_of(draft(start), overlapping, card_mib)
                 # One snapshot, one BEGIN IMMEDIATE: that is what makes a group atomic --
@@ -554,14 +580,16 @@ class ClaimsStore:
                 for g in group_gpus:
                     cur = conn.execute(
                         "INSERT INTO claims (user, gpu, vram_mib, start, end, note, "
-                        "created_at, created_ip, priority, auto_advance, group_id) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "created_at, created_ip, priority, auto_advance, group_id, "
+                        "notice_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (user, g, vram_mib, start.isoformat(), end.isoformat(), note,
-                         now.isoformat(), ip, priority, int(auto_advance), group_id))
+                         now.isoformat(), ip, priority, int(auto_advance), group_id,
+                         notice_seconds))
                     made.append(Booking(id=cur.lastrowid, user=user, gpu=g,
                                         vram_mib=vram_mib, start=start, end=end, note=note,
                                         created_at=now, created_ip=ip, priority=priority,
-                                        auto_advance=auto_advance, group_id=group_id))
+                                        auto_advance=auto_advance, group_id=group_id,
+                                        notice_seconds=notice_seconds))
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:

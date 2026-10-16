@@ -606,12 +606,14 @@ def test_giving_both_end_and_duration_is_rejected(live):
     assert status == 400
 
 
-def test_auto_advance_round_trips(live):
+def test_auto_advance_and_notice_seconds_round_trip(live):
     status, _, body = _post(live + "/api/claims",
                             _booking(start=None, end=None, duration_minutes=60,
-                                     auto_advance=True))
+                                     auto_advance=True, notice_seconds=0))
     assert status == 201
-    assert json.loads(body)["claim"]["auto_advance"] is True
+    claim = json.loads(body)["claim"]
+    assert claim["auto_advance"] is True
+    assert claim["notice_seconds"] == 0
 
 
 @pytest.mark.parametrize("field,value", [("auto_advance", "yes"), ("count", 0),

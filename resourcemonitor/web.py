@@ -373,7 +373,8 @@ class _Handler(BaseHTTPRequestHandler):
                                     card_mib=card_mib, priority=priority,
                                     grace=self._grace(), auto_advance=auto_advance,
                                     not_later_than=not_later_than, count=count,
-                                    cards=cards, max_pending=self._max_pending())
+                                    cards=cards, max_pending=self._max_pending(),
+                                    notice_seconds=notice)
 
     def _cards(self) -> dict[int, int]:
         """Each GPU's total MiB from the latest poll; the default card size for every GPU
