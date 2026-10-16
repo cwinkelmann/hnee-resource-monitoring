@@ -124,6 +124,13 @@ class Created:
         return self.bookings[0]
 
 
+@dataclass(frozen=True)
+class Released:
+    """A released booking and any assigned slots that moved earlier because of it."""
+    booking: Booking
+    advanced: list[dict] = field(default_factory=list)
+
+
 class ClaimError(Exception):
     def __init__(self, status: int, detail: str, extra: dict | None = None):
         super().__init__(detail)
@@ -545,6 +552,58 @@ class ClaimsStore:
                        asked if asked is not None and start != asked else None,
                        assigned_later)
 
+    def release(self, claim_id: int, *, end: datetime | None, ip: str, now: datetime,
+                cards: dict[int, int] | None = None) -> Released:
+        """Give a card back honestly. A booking under way has its end moved, so the window
+        it really used stays on the calendar and in the energy ledger; a booking that has
+        not started is cancelled instead, because end < start is a nonsense row. Moving the
+        end *later* is an extension and re-checks capacity, so it can lose to an assigned
+        slot. Releasing a booking that is already over is a no-op."""
+        now = _utc(now)
+        new_end = now if end is None else _utc(end)
+        # The row is read again inside the transaction, so this is an early exit, not a race.
+        b = self.get(claim_id)
+        if b is None:
+            raise ClaimError(404, "no such booking")
+        if b.cancelled_at is not None:
+            raise ClaimError(409, "already cancelled")
+        if b.start > now:
+            return Released(self.cancel(claim_id, ip=ip, now=now, cards=cards))
+        with self._lock:
+            conn = self._conn
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(f"SELECT {_COLUMNS} FROM claims WHERE id = ?",
+                                   (claim_id,)).fetchone()
+                if row is None:
+                    raise ClaimError(404, "no such booking")
+                b = _row(row)
+                if b.cancelled_at is not None:
+                    raise ClaimError(409, "already cancelled")
+                if b.end <= now:
+                    conn.execute("COMMIT")
+                    return Released(b)          # already over: nothing left to give back
+                if new_end < b.start:
+                    raise ClaimError(400, "end must be after start")
+                if new_end > b.end:
+                    overlapping = [_row(r) for r in conn.execute(
+                        f"SELECT {_COLUMNS} FROM claims WHERE gpu = ? "
+                        "AND cancelled_at IS NULL AND id != ? AND start < ? AND end > ?",
+                        (b.gpu, b.id, new_end.isoformat(), b.end.isoformat()))]
+                    card = (cards or {}).get(b.gpu, DEFAULT_CARD_MIB)
+                    _check_capacity(overlapping, b.gpu, b.vram_mib, b.end, new_end, card,
+                                    b.priority)
+                conn.execute("UPDATE claims SET end = ? WHERE id = ?",
+                             (new_end.isoformat(), claim_id))
+                out = _row(conn.execute(f"SELECT {_COLUMNS} FROM claims WHERE id = ?",
+                                        (claim_id,)).fetchone())
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        return Released(out)
+
     def quick(self, *, user: str | None, gpu: int, ip: str, now: datetime,
               card_mib: int = DEFAULT_CARD_MIB) -> Booking | None:
         """Set (user) or clear (None) a GPU's quick holder: the whole card from now until the
@@ -596,13 +655,24 @@ class ClaimsStore:
                        note=QUICK_NOTE, created_at=now, created_ip=ip, kind="quick",
                        priority="lendable")
 
-    def cancel(self, claim_id: int, *, ip: str, now: datetime) -> Booking:
-        """Idempotent: cancelling an already-cancelled booking changes nothing."""
+    def cancel(self, claim_id: int, *, ip: str, now: datetime,
+               cards: dict[int, int] | None = None) -> Booking:
+        """Idempotent: cancelling an already-cancelled booking changes nothing.
+        Cancelling a not-yet-started member of a group cancels the whole set -- a group
+        exists so its cards are held together, and a partial group would sit on idle cards
+        waiting for a member that is already gone."""
         now = _utc(now)
         with self._lock:
             conn = self._conn
             conn.execute("BEGIN IMMEDIATE")
             try:
+                head = conn.execute("SELECT group_id, start FROM claims WHERE id = ?",
+                                    (claim_id,)).fetchone()
+                if head is not None and head[0] is not None and _ts(head[1]) > now:
+                    conn.execute("UPDATE claims SET cancelled_at = ?, cancelled_ip = ? "
+                                 "WHERE group_id = ? AND cancelled_at IS NULL "
+                                 "AND start > ?",
+                                 (now.isoformat(), ip, head[0], now.isoformat()))
                 conn.execute("UPDATE claims SET cancelled_at = ?, cancelled_ip = ? "
                                 "WHERE id = ? AND cancelled_at IS NULL",
                                 (now.isoformat(), ip, claim_id))
