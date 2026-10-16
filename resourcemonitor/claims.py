@@ -11,6 +11,7 @@ import pwd
 import re
 import sqlite3
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -203,6 +204,10 @@ def _validate_user(users: UserDirectory, user: str) -> None:
         raise ClaimError(400, "invalid user name")
     if not users.known(user):
         raise ClaimError(400, f"unknown user '{user}'")
+
+
+def _is_count(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 1
 
 
 def _validate_gpu(gpu: int) -> None:
@@ -399,7 +404,7 @@ class ClaimsStore:
                now: datetime, card_mib: int = DEFAULT_CARD_MIB,
                priority: str = "lendable", grace: timedelta = DEFAULT_GRACE,
                duration: timedelta | None = None, auto_advance: bool = False,
-               not_later_than: datetime | None = None,
+               not_later_than: datetime | None = None, count: int = 1,
                cards: dict[int, int] | None = None) -> Created:
         """Book, or raise ClaimError. With start=None the server assigns the earliest slot
         that fits and the booking never fails for lack of capacity; with an explicit start
@@ -407,12 +412,19 @@ class ClaimsStore:
         squeeze a lendable booking already under way starts no earlier than now + grace.
 
         Give exactly one of end and duration. gpu=None lets the server pick the card.
+        count > 1 books that many cards atomically: one group_id, one shared start.
         """
         from resourcemonitor.slots import earliest_fit, earliest_fit_group
         if priority not in PRIORITIES:
             raise ClaimError(400, "priority must be lendable or important")
         if (end is None) == (duration is None):
             raise ClaimError(400, "give exactly one of end and duration")
+        if not _is_count(count):
+            raise ClaimError(400, "count must be a whole number of GPUs, 1 or more")
+        if count > GPU_COUNT:
+            raise ClaimError(400, f"count must be at most {GPU_COUNT}")
+        if count > 1 and (gpu is not None or start is not None):
+            raise ClaimError(400, "a group booking cannot name a GPU or a start")
         now = _utc(now)
         if duration is None:
             duration = _utc(end) - _utc(start if start is not None else now)
@@ -444,23 +456,25 @@ class ClaimsStore:
                     # lendable work it is entitled to take.
                     fit_rows = rows if priority != "important" else \
                         [b for b in rows if b.priority == "important"]
-                    hit = earliest_fit_group(fit_rows, 1, vram_mib, duration, cards, now,
-                                             gpus=None if gpu is None else [gpu])
+                    hit = earliest_fit_group(fit_rows, count, vram_mib, duration, cards,
+                                             now, gpus=None if gpu is None else [gpu])
                     if hit is None:
                         raise ClaimError(409, f"no slot fits within the next {MAX_DAYS} days",
                                          {"earliest": None,
                                           "free_now": _free_now(fit_rows, cards, gpu, now)})
-                    start, chosen = hit[0], hit[1][0]
+                    start, group_gpus = hit
                     if not_later_than is not None and start > _utc(not_later_than):
                         raise ClaimError(409, "the earliest slot is later than asked",
                                          {"earliest": start.isoformat(),
-                                          "free_now": _free_now(fit_rows, cards, chosen, now)})
-                    gpu, card_mib = chosen, cards[chosen]
+                                          "free_now": _free_now(fit_rows, cards,
+                                                                group_gpus[0], now)})
+                    gpu, card_mib = group_gpus[0], cards[group_gpus[0]]
                     end = start + duration
                     assigned_later = start > now
                     overlapping = [b for b in rows if b.gpu == gpu
                                    and b.start < end and b.end > start]
                 else:
+                    group_gpus = [gpu]
                     start, end = asked, _utc(end)
                     _validate_window(start, end, now)
                     assigned_later = False
@@ -507,22 +521,27 @@ class ClaimsStore:
                                               f"{int(grace.total_seconds() // 60)} minutes "
                                               "from now")
                     takes = takes_of(draft(start), overlapping, card_mib)
-                cur = conn.execute(
-                    "INSERT INTO claims (user, gpu, vram_mib, start, end, note, created_at, "
-                    "created_ip, priority, auto_advance) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (user, gpu, vram_mib, start.isoformat(), end.isoformat(), note,
-                     now.isoformat(), ip, priority, int(auto_advance)))
-                claim_id = cur.lastrowid
+                # One snapshot, one BEGIN IMMEDIATE: that is what makes a group atomic --
+                # no second writer can take the third card between members two and four.
+                group_id = uuid.uuid4().hex if count > 1 else None
+                made: list[Booking] = []
+                for g in group_gpus:
+                    cur = conn.execute(
+                        "INSERT INTO claims (user, gpu, vram_mib, start, end, note, "
+                        "created_at, created_ip, priority, auto_advance, group_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (user, g, vram_mib, start.isoformat(), end.isoformat(), note,
+                         now.isoformat(), ip, priority, int(auto_advance), group_id))
+                    made.append(Booking(id=cur.lastrowid, user=user, gpu=g,
+                                        vram_mib=vram_mib, start=start, end=end, note=note,
+                                        created_at=now, created_ip=ip, priority=priority,
+                                        auto_advance=auto_advance, group_id=group_id))
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
                 raise
-        booking = Booking(id=claim_id, user=user, gpu=gpu, vram_mib=vram_mib, start=start,
-                          end=end, note=note, created_at=now, created_ip=ip,
-                          priority=priority, auto_advance=auto_advance)
-        return Created([booking], takes,
+        return Created(made, takes,
                        asked if asked is not None and start != asked else None,
                        assigned_later)
 

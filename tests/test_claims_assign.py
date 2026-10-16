@@ -98,3 +98,57 @@ def test_nothing_fits_before_the_horizon(store):
     assert e.value.status == 409
     assert e.value.extra["earliest"] is None
     assert e.value.extra["free_now"] == CARD - 79 * 1024
+
+
+def test_four_cards_are_assigned_one_shared_start(store):
+    made = _assign(store, gpu=None, count=4)
+    starts = {b.start for b in made.bookings}
+    assert len(made.bookings) == 4
+    assert starts == {T0}
+    assert sorted(b.gpu for b in made.bookings) == [0, 1, 2, 3]
+
+
+def test_a_group_shares_one_group_id_and_singles_have_none(store):
+    group = _assign(store, gpu=None, count=4)
+    ids = {b.group_id for b in group.bookings}
+    assert len(ids) == 1 and ids != {None}
+    single = _assign(store, gpu=None, count=1)
+    assert single.booking.group_id is None
+
+
+def test_a_group_waits_for_the_last_card(store):
+    # A four-card box, each card busy for a different length of time: the group starts when
+    # the last one frees, all four together, rather than taking each card as it comes.
+    for g in range(4):
+        book(store, gpu=g, gib=79, start=T0, hours=g + 1)
+    made = _assign(store, gpu=None, count=4, cards={g: CARD for g in range(4)})
+    assert {b.start for b in made.bookings} == {T0 + timedelta(hours=4)}
+    assert made.assigned_later is True
+
+
+def test_a_group_larger_than_the_box_is_a_400(store):
+    with pytest.raises(ClaimError) as e:
+        _assign(store, gpu=None, count=9)
+    assert e.value.status == 400
+
+
+def test_count_must_be_a_whole_number_above_zero(store):
+    for bad in (0, -1, 1.5, True, "4"):
+        with pytest.raises(ClaimError) as e:
+            _assign(store, gpu=None, count=bad)
+        assert e.value.status == 400
+
+
+def test_a_group_cannot_name_one_card_or_one_start(store):
+    with pytest.raises(ClaimError) as e:
+        _assign(store, gpu=4, count=2)
+    assert e.value.status == 400
+    with pytest.raises(ClaimError) as e:
+        _assign(store, gpu=None, count=2, start=T0, end=T0 + H, duration=None)
+    assert e.value.status == 400
+
+
+def test_every_group_member_is_an_ordinary_row_the_next_booking_respects(store):
+    _assign(store, gpu=None, count=8, vram_mib=79 * 1024)
+    later = _assign(store, gpu=None, vram_mib=79 * 1024)
+    assert later.booking.start == T0 + H
