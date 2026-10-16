@@ -878,6 +878,15 @@ def _read_ro(path: Path | str, where: str, params: tuple) -> list[Booking]:
         return []
 
 
+def get_ro(path: Path | str, claim_id: int) -> Booking | None:
+    """One booking, read with mode=ro (fail-open, see _read_ro). A GET never opens the
+    bookings file for writing."""
+    if not isinstance(claim_id, int) or isinstance(claim_id, bool):
+        return None
+    rows = _read_ro(path, "WHERE id = ? LIMIT 1", (claim_id,))
+    return rows[0] if rows else None
+
+
 def load_active(path: Path | str, t: datetime) -> list[Booking]:
     """Bookings active at t, read with mode=ro (fail-open, see _read_ro)."""
     try:

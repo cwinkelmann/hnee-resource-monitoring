@@ -22,8 +22,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from resourcemonitor.claims import (DEFAULT_CARD_MIB, DEFAULT_CLAIMS, DEFAULT_GRACE, GPU_COUNT,
                                     MIB_PER_GIB, ClaimError, ClaimsStore, PwdUsers,
-                                    UserDirectory, list_window_ro, load_active, parse_time,
-                                    taken_segments)
+                                    UserDirectory, get_ro, list_window_ro, load_active,
+                                    parse_time, taken_segments)
+from resourcemonitor.watchers import Watchers
 from resourcemonitor.paths import DEFAULT_HISTORY, DEFAULT_POLICY
 from resourcemonitor.policy import load_policy
 from resourcemonitor.queries import (NoHistory, _seg_json, latest, open_ro, timeline,
@@ -48,6 +49,8 @@ _DRAIN_MAX = 64 * 1024                          # unread body bytes swallowed be
 _DRAIN_TIMEOUT_S = 1
 _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
 _RELEASE = re.compile(r"^/api/claims/(\d{1,9})/release$", re.ASCII)
+_EVENTS = re.compile(r"^/api/claims/(\d{1,9})/events$", re.ASCII)
+EVENT_HOLD_S = 60        # how long one request is parked before the client reconnects
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
                                  "/api/vram", "/api/timeline", "/api/users", "/healthz",
                                  "/api/capacity"}
@@ -186,6 +189,12 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/favicon.ico":       # browsers ask regardless; the page links the SVG
                 self._send(204, b"", "text/plain")
                 return
+            m_events = _EVENTS.match(path)
+            if m_events is not None:
+                # Not in _HEAVY: those two semaphore slots stop SQLite scans piling up,
+                # and a request parked for a minute holding one would stall the dashboard.
+                self._events(int(m_events.group(1)))
+                return
             handler = {"/api/now": self._now, "/api/usage": self._usage,
                        "/api/timeseries": self._timeseries, "/api/vram": self._vram,
                        "/api/timeline": self._timeline,
@@ -245,6 +254,13 @@ class _Handler(BaseHTTPRequestHandler):
                                  "advanced": out.advanced})
             elif m is None:
                 made = self._create(body)
+                # After _create returned, so the store's transaction is committed and its
+                # lock released: the Watchers lock is never held across the claims lock.
+                for r in made.revoked:
+                    self.server.watchers.notify(r["id"], {
+                        "event": "taken", "effective_mib": r["effective_mib"],
+                        "lost_mib": r["lost_mib"], "by": r["by"],
+                        "truncated": r["truncated"], "deadline": r["at"]})
                 self._json(201, {
                     "claim": made.booking.to_json(),
                     "claims": [b.to_json() for b in made.bookings],
@@ -260,7 +276,13 @@ class _Handler(BaseHTTPRequestHandler):
                 if body:
                     raise ClaimError(400, "unknown field")
                 claim = self._store().cancel(int(m.group(1)), ip=self.client_address[0],
-                                             now=self.server.clock())
+                                             now=self.server.clock(),
+                                             cards=self._cards())
+                # A cancellation is a revocation notice to the job as much as a take is.
+                self.server.watchers.notify(claim.id, {
+                    "event": "cancelled", "effective_mib": 0, "lost_mib": claim.vram_mib,
+                    "by": [], "truncated": False,
+                    "deadline": claim.cancelled_at.isoformat()})
                 self._json(200, {"claim": claim.to_json()})
         except _Reject as e:
             self._drain()
@@ -270,6 +292,34 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"request failed: {e.__class__.__name__}", flush=True)
             self._json(500, {"error": "internal"})
+
+    def _events(self, claim_id: int) -> None:
+        """Park this request until the booking is squeezed or cancelled, then answer with
+        one event. The job dials out because nothing can dial in: the t14 has no route to
+        carrot's subnet. The parked connection is also the liveness signal claims.create()
+        reads through Watchers.attached, which is why a dead job stops being promised
+        notice."""
+        now = self.server.clock()
+        b = get_ro(self.server.claims_path, claim_id)
+        if b is None:
+            self._json(404, {"error": "not found"})
+            return
+        if b.cancelled_at is not None:
+            self._json(409, {"error": "conflict", "detail": "already cancelled"})
+            return
+        if b.end <= now:
+            self._json(409, {"error": "conflict", "detail": "booking is over"})
+            return
+        watch = self.server.watchers.register(claim_id)
+        if watch is None:
+            self._json(503, {"error": "busy"})
+            return
+        with watch:
+            event = watch.wait(EVENT_HOLD_S)
+        if event is None:
+            self._send(204, b"", "application/json")
+        else:
+            self._json(200, event)
 
     def _claim_error(self, e: ClaimError) -> None:
         """The fixed {error, detail} shape, plus whatever machine-readable extras the store
@@ -605,8 +655,12 @@ class _Server(ThreadingHTTPServer):
     store: ClaimsStore | None = None
     store_lock: threading.Lock
     host_name: str
+    watchers: Watchers
 
     def server_close(self) -> None:
+        # Before super(), so no request is still parked when the socket closes: a held
+        # long-poll must never delay the restart a deploy performs by hand.
+        self.watchers.shutdown()
         super().server_close()
         with self.store_lock:
             if self.store is not None:
@@ -627,6 +681,12 @@ def make_server(bind: str, port: int, history_path: Path, policy_path: Path,
     srv.claims_path = Path(claims_path)
     srv.users = users if users is not None else PwdUsers()
     srv.store_lock = threading.Lock()                # the store itself opens on the first write
+    try:
+        cap = load_policy(Path(policy_path)).max_watchers
+    except Exception:
+        cap = 64
+    # A thread budget, not a policy decision: changing it needs a restart, like the port.
+    srv.watchers = Watchers(max_watchers=cap)
     srv.host_name = socket.gethostname().split(".")[0]   # carrot.internal -> carrot
     return srv
 
