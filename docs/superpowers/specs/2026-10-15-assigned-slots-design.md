@@ -133,8 +133,13 @@ def advance_order(bookings) -> list[Booking]
 
 `earliest_fit` builds the step function of booked VRAM on a card from active and future
 bookings, and returns the first instant `t >= now` where `booked(c, τ) + vram_mib <=
-card_mib` holds for **all** of `[t, t + duration_s)`. With `gpu = None` it is the minimum
-across cards; the winning card is the argmin, ties broken by lowest index.
+card_mib` holds for **all** of `[t, t + duration)`. Booked VRAM only rises at a booking's
+start and only falls at an end, so the earliest feasible `t` is `now` or some booking's end:
+that finite candidate set is the whole algorithm, with no search over time.
+
+Choosing a card is not a second mechanism. A booking with no card named is
+`earliest_fit_group(count=1)`, whose answer is the earliest instant with ties broken by
+lowest index — so "which card" has one implementation, not two.
 
 `POST /api/claims` without an explicit `start` now means "earliest": the server answers with
 the assigned window rather than 409. An explicit `start` keeps today's exact behaviour,
@@ -216,8 +221,11 @@ start = now + max(effective_notice(v) for v in victims)
 ```
 
 over the lendable bookings the new important booking takes — `takes_of()` already returns
-exactly that list — where `effective_notice(v)` is `v.notice_seconds` when a watcher is
-attached to `v` at that moment, and `policy.grace_minutes` otherwise. With no victims the
+exactly that list — where `effective_notice(v)` is `min(v.notice_seconds, grace_minutes)`
+when a watcher is attached to `v` at that moment, and `policy.grace_minutes` otherwise. The
+clamp matters: a declared notice may only ever **shorten** the wait. Without it a job asking
+for `notice_seconds = 86400` would make itself unpreemptable for a day, which inverts the
+whole feature. With no victims the
 start is now, as today. A booking made in the browser leaves `notice_seconds` NULL and
 behaves exactly as it does on main.
 
@@ -236,7 +244,7 @@ just-started job loses the card rather than the one five hours in. `taken_segmen
 already answers *when, how much and by whom* for a given lendable booking.
 
 Revocation is therefore not a new decision, only a written one. At the instant the important
-booking starts, every victim whose effective VRAM has fallen below what it booked gets `end`
+booking starts, every victim left with **nothing** — `allocate()` gives it 0 MiB — has `end`
 truncated to that instant, exactly as an early `release` does: the used window stays in the
 calendar and the energy ledger, the freed tail becomes bookable, and `advance_order` runs as
 it does after any truncation — so Alice's own next slot may move earlier into the gap she
