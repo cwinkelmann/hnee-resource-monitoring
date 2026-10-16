@@ -2,10 +2,13 @@
 from datetime import datetime, timedelta, timezone
 
 from resourcemonitor.claims import Booking
-from resourcemonitor.slots import HORIZON, booked_at, earliest_fit, fits
+from resourcemonitor.slots import (HORIZON, booked_at, earliest_fit,
+                                   earliest_fit_group, fits)
 
 T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 CARD = 81559
+CARDS8 = {g: CARD for g in range(8)}
+CARDS4 = {g: CARD for g in range(4)}
 H = timedelta(hours=1)
 
 
@@ -79,3 +82,45 @@ def test_fits_is_exclusive_at_the_end_so_back_to_back_slots_work():
 
 def test_horizon_matches_the_fourteen_day_booking_limit():
     assert HORIZON == timedelta(days=14)
+
+
+def test_group_waits_for_the_last_card_and_never_staggers():
+    # A four-card box, every card blocked for 1, 2, 3 and 4 hours: the group starts at +4h,
+    # all four together, rather than taking each card as it frees.
+    rows = [b(gpu=g, gib=79, hours=g + 1, bid=g + 1) for g in range(4)]
+    got = earliest_fit_group(rows, 4, 20 * 1024, H, CARDS4, T0)
+    assert got == (T0 + timedelta(hours=4), [0, 1, 2, 3])
+
+
+def test_group_prefers_free_cards_over_waiting():
+    rows = [b(gpu=g, gib=79, hours=9, bid=g + 1) for g in range(4)]
+    got = earliest_fit_group(rows, 4, 20 * 1024, H, CARDS8, T0)
+    assert got == (T0, [4, 5, 6, 7])
+
+
+def test_group_picks_lowest_indices_among_equals():
+    assert earliest_fit_group([], 2, 20 * 1024, H, CARDS8, T0) == (T0, [0, 1])
+
+
+def test_group_larger_than_the_box_never_fits():
+    assert earliest_fit_group([], 9, 20 * 1024, H, CARDS8, T0) is None
+
+
+def test_group_respects_a_gpus_restriction():
+    assert earliest_fit_group([], 2, 20 * 1024, H, CARDS8, T0, gpus=[5, 6]) == (T0, [5, 6])
+
+
+def test_count_one_is_how_a_floating_booking_chooses_its_card():
+    rows = [b(gpu=0, gib=79, hours=3)]
+    assert earliest_fit_group(rows, 1, 20 * 1024, H, CARDS8, T0) == (T0, [1])
+
+
+def test_group_honours_per_card_sizes():
+    # t14's single 16 GiB card cannot host 20 GiB at all.
+    assert earliest_fit_group([], 1, 20 * 1024, H, {0: 16376}, T0) is None
+    assert earliest_fit_group([], 1, 10 * 1024, H, {0: 16376}, T0) == (T0, [0])
+
+
+def test_group_beyond_the_horizon_is_none():
+    rows = [b(gpu=g, gib=79, hours=24 * 20, bid=g + 1) for g in range(8)]
+    assert earliest_fit_group(rows, 2, 20 * 1024, H, CARDS8, T0) is None

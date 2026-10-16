@@ -49,3 +49,25 @@ def earliest_fit(bookings: list[Booking], gpu: int, vram_mib: int, duration: tim
         if fits(rows, gpu, vram_mib, t, duration, card_mib):
             return t
     return None
+
+
+def earliest_fit_group(bookings: list[Booking], count: int, vram_mib: int,
+                       duration: timedelta, cards: dict[int, int], now: datetime,
+                       gpus: list[int] | None = None) -> tuple[datetime, list[int]] | None:
+    """The earliest instant where `count` cards can each host `vram_mib` for the whole
+    duration, with the lowest-index fitting cards chosen. All members share one start --
+    a group assigned staggered starts would sit holding idle cards, which is the whole
+    reason groups exist. count=1 is also how a booking with no chosen card picks one."""
+    allowed = sorted(cards if gpus is None else [g for g in gpus if g in cards])
+    if count < 1 or count > len(allowed):
+        return None
+    limit = now + HORIZON
+    candidates = [now] + sorted({b.end for b in bookings
+                                 if b.cancelled_at is None and now < b.end <= limit
+                                 and b.gpu in cards})
+    for t in candidates:
+        free = [g for g in allowed
+                if fits(bookings, g, vram_mib, t, duration, cards[g])]
+        if len(free) >= count:
+            return t, free[:count]
+    return None
