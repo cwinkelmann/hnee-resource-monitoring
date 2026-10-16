@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from resourcemonitor.claims import Booking
 from resourcemonitor.slots import (HORIZON, booked_at, earliest_fit,
                                    earliest_fit_group, fits)
+from resourcemonitor.slots import advance_order
 
 T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 CARD = 81559
@@ -124,3 +125,25 @@ def test_group_honours_per_card_sizes():
 def test_group_beyond_the_horizon_is_none():
     rows = [b(gpu=g, gib=79, hours=24 * 20, bid=g + 1) for g in range(8)]
     assert earliest_fit_group(rows, 2, 20 * 1024, H, CARDS8, T0) is None
+
+
+def _pending(bid, priority="lendable", start_h=1, created_h=0):
+    start = T0 + timedelta(hours=start_h)
+    return Booking(id=bid, user="alice", gpu=0, vram_mib=20 * 1024, start=start,
+                   end=start + H, note=None, created_at=T0 + timedelta(hours=created_h),
+                   created_ip="10.0.0.1", priority=priority, auto_advance=True)
+
+
+def test_important_moves_before_lendable():
+    rows = [_pending(1), _pending(2, priority="important")]
+    assert [b.id for b in advance_order(rows)] == [2, 1]
+
+
+def test_within_a_class_the_earlier_start_moves_first():
+    rows = [_pending(1, start_h=5), _pending(2, start_h=2)]
+    assert [b.id for b in advance_order(rows)] == [2, 1]
+
+
+def test_an_equal_start_is_broken_by_who_asked_first():
+    rows = [_pending(1, created_h=3), _pending(2, created_h=1)]
+    assert [b.id for b in advance_order(rows)] == [2, 1]

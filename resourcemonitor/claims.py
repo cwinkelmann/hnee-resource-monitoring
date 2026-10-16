@@ -319,6 +319,11 @@ def takes_of(new: Booking, existing: list[Booking], total_mib: int) -> list[dict
                   key=lambda s: (s["start"], s["id"]))
 
 
+def _all_cards() -> dict[int, int]:
+    """Every GPU at the default card size: the fallback when a caller has no live totals."""
+    return {g: DEFAULT_CARD_MIB for g in range(GPU_COUNT)}
+
+
 def _free_now(rows: list[Booking], cards: dict[int, int], gpu: int | None,
               now: datetime) -> int:
     """The most MiB free on one card at `now` -- what "book less" would have to fit into.
@@ -552,6 +557,50 @@ class ClaimsStore:
                        asked if asked is not None and start != asked else None,
                        assigned_later)
 
+    def _advance(self, conn, now: datetime, cards: dict[int, int]) -> list[dict]:
+        """Move every advanceable booking to the earliest slot that now fits, re-reading
+        the timeline after each move so advances cascade. Called only from inside the
+        transaction of a write that freed capacity -- time passing can never make a slot
+        advanceable, because earliest_fit already priced in every known end."""
+        from resourcemonitor.slots import advance_order, earliest_fit, earliest_fit_group
+        moved: list[dict] = []
+
+        def timeline() -> list[Booking]:
+            return [_row(r) for r in conn.execute(
+                f"SELECT {_COLUMNS} FROM claims WHERE cancelled_at IS NULL AND end > ?",
+                (now.isoformat(),))]
+
+        rows = timeline()
+        pending = [b for b in rows if b.auto_advance and b.start > now]
+        seen_groups: set[str] = set()
+        for b in advance_order(pending):
+            if b.group_id is not None and b.group_id in seen_groups:
+                continue
+            members = [m for m in rows if m.group_id == b.group_id] \
+                if b.group_id is not None else [b]
+            duration = b.end - b.start
+            others = [r for r in rows if r.id not in {m.id for m in members}]
+            if b.group_id is None:
+                hit = earliest_fit(others, b.gpu, b.vram_mib, duration,
+                                   cards.get(b.gpu, DEFAULT_CARD_MIB), now)
+                new_start, new_gpus = (hit, [b.gpu]) if hit is not None else (None, [])
+            else:
+                seen_groups.add(b.group_id)
+                got = earliest_fit_group(others, len(members), b.vram_mib, duration,
+                                         cards, now)
+                new_start, new_gpus = got if got is not None else (None, [])
+            if new_start is None or new_start >= b.start:
+                continue
+            for m, g in zip(members, new_gpus):
+                conn.execute("UPDATE claims SET start = ?, end = ?, gpu = ? WHERE id = ?",
+                             (new_start.isoformat(), (new_start + duration).isoformat(),
+                              g, m.id))
+                moved.append({"id": m.id, "user": m.user, "gpu": g,
+                              "old_start": m.start.isoformat(),
+                              "new_start": new_start.isoformat()})
+            rows = timeline()
+        return moved
+
     def release(self, claim_id: int, *, end: datetime | None, ip: str, now: datetime,
                 cards: dict[int, int] | None = None) -> Released:
         """Give a card back honestly. A booking under way has its end moved, so the window
@@ -597,12 +646,13 @@ class ClaimsStore:
                              (new_end.isoformat(), claim_id))
                 out = _row(conn.execute(f"SELECT {_COLUMNS} FROM claims WHERE id = ?",
                                         (claim_id,)).fetchone())
+                moved = self._advance(conn, now, cards or _all_cards())
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
                 raise
-        return Released(out)
+        return Released(out, moved)
 
     def quick(self, *, user: str | None, gpu: int, ip: str, now: datetime,
               card_mib: int = DEFAULT_CARD_MIB) -> Booking | None:
@@ -678,6 +728,8 @@ class ClaimsStore:
                                 (now.isoformat(), ip, claim_id))
                 row = conn.execute(f"SELECT {_COLUMNS} FROM claims WHERE id = ?",
                                       (claim_id,)).fetchone()
+                if row is not None:
+                    self._advance(conn, now, cards or _all_cards())
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:

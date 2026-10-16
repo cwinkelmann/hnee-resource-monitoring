@@ -71,3 +71,11 @@ def earliest_fit_group(bookings: list[Booking], count: int, vram_mib: int,
         if len(free) >= count:
             return t, free[:count]
     return None
+
+
+def advance_order(bookings: list[Booking]) -> list[Booking]:
+    """The order in which pending bookings get offered freed capacity: important first,
+    then the earliest start, then whoever asked first. One group member stands for its
+    group, which is why the id is only the final tie-break."""
+    return sorted(bookings, key=lambda b: (b.priority != "important", b.start,
+                                           b.created_at, b.id))
