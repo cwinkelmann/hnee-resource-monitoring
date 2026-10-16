@@ -15,6 +15,20 @@ A job asks for resources when it starts. It always gets an answer it can act on:
 
 No queue to poll for a maybe, no supervisor, no fleet. One call, one answer, a start time.
 
+## The user stories this serves
+
+From `UserStories.md` (8 GPU, 224 CPU, 1 TB RAM server):
+
+| story | behaviour |
+|---|---|
+| Alice wants a specific window; Bob already holds 5 cards for 6 h | The booking **fails**, as today — an explicit `start` still answers 409. The error carries `earliest` and `free_now` so her two options, *book later* or *book less*, are in the answer instead of guesswork. |
+| Alice needs **4 GPUs uninterrupted** and does not care when | An **atomic group booking**: the earliest instant where all four fit for the whole duration, assigned as a set. Her script waits and starts when the slot opens. Without atomicity she would be assigned cards at four different times and sit holding idle ones. |
+| Alice books 40 GiB, 40 GiB remain free; Bob should still run | Already true: `_check_capacity` sums VRAM per card, so partial-card sharing works. Pinned by an explicit test so it stays true. |
+
+**CPU and RAM are deliberately not bookable.** PR #6 monitors them for display. With 224
+cores and 1 TB against 8 cards, the GPU is the binding constraint; booking cores and RAM
+would widen the schema, the capacity check, the form and the SDK for little gain.
+
 ## Why
 
 **You cannot wait in line today.** Someone holding eight cards at 10 GiB each blocks an
@@ -64,11 +78,12 @@ is an ordinary claims row, so:
 
 ## Data model
 
-Schema **v3 → v4** adds one column to `claims`, following the existing `_migrate()`
+Schema **v3 → v4** adds two columns to `claims`, following the existing `_migrate()`
 pattern on main (`PRAGMA user_version`, one transaction, additive only):
 
 ```sql
 ALTER TABLE claims ADD COLUMN auto_advance INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claims ADD COLUMN group_id     TEXT;   -- NULL for a single-card booking
 ```
 
 Main is already at `SCHEMA_VERSION = 3`: v1 → v2 added `kind`, v2 → v3 added `priority`.
@@ -84,7 +99,13 @@ storing it. There is also prior art for the server choosing a start: `create()` 
 `grace` and moves a booking's start forward when it would land on a running job. An assigned
 slot is the same idea carried further — the server already decides start times.
 
+`group_id` makes a multi-card need atomic. `book(count=4)` creates four ordinary claims
+rows sharing one `group_id`, so every existing consumer — `_check_capacity`, `allocate()`,
+the calendar, the energy attribution — keeps working unchanged on rows it already
+understands. The group matters only to three operations: assignment, advancing and cancel.
+
 A booking is **advanceable** when `auto_advance = 1 AND start > now AND cancelled_at IS NULL`.
+A group is advanceable only when **every** member is.
 
 ## Booking: `earliest_fit`
 
@@ -92,6 +113,8 @@ New pure module `resourcemonitor/slots.py` — no SQL, no clock of its own:
 
 ```python
 def earliest_fit(bookings, gpu, vram_mib, duration_s, card_mib, now) -> datetime | None
+def earliest_fit_group(bookings, count, vram_mib, duration_s, cards, now,
+                       gpus=None) -> tuple[datetime, list[int]] | None
 def advance_order(bookings) -> list[Booking]
 ```
 
@@ -103,6 +126,15 @@ across cards; the winning card is the argmin, ties broken by lowest index.
 `POST /api/claims` without an explicit `start` now means "earliest": the server answers with
 the assigned window rather than 409. An explicit `start` keeps today's exact behaviour,
 including 409 — a calendar booking for Tuesday must still fail if Tuesday is full.
+
+`earliest_fit_group` answers the atomic case. It walks the same candidate instants (every
+booking start and end at or after `now`, plus `now` itself) and, at each, counts how many
+cards can host `vram_mib` for the whole of `[t, t + duration_s)`. The first instant where
+that count reaches `count` wins, and the lowest-index fitting cards are chosen. A group is
+therefore never assigned staggered start times, which is the whole point of the story.
+
+A 409 for an explicit `start` now carries both `earliest` (when it would fit) and `free_now`
+(how much would fit immediately), so "book later or book less" is in the answer.
 
 `not_later_than` is an optional request parameter, not a stored field: if
 `earliest_fit > not_later_than` the server answers `409 conflict` with the earliest it could
@@ -138,9 +170,12 @@ Within the releasing transaction:
 1. collect advanceable bookings, ordered by `advance_order`: `important` before `lendable`,
    then `start` ascending, then `created_at` ascending (first asked, first moved);
 2. for each in turn, recompute `earliest_fit` for its own `vram_mib` and duration on its own
-   card (or any card, if it was booked with `gpu = None`);
+   card (or any card, if it was booked with `gpu = None`); for a group, recompute
+   `earliest_fit_group` for the whole shape instead;
 3. if that instant is earlier than its current `start`, move the window, preserving
-   duration, and record it;
+   duration, and record it. **A group moves only if every member can move to the same new
+   start** — never partially. A not-yet-started booking may land on a different card than
+   it was first assigned, which is harmless because nothing has run on it yet;
 4. re-evaluate the next one against the updated timeline.
 
 `POST /api/claims/{id}/release` returns `advanced: [{id, user, old_start, new_start}]`, so
@@ -244,7 +279,13 @@ can see themselves blocking.
 
 - `tests/test_slots.py` — table-driven, pure, no DB, no GPU: `earliest_fit` (gaps,
   exact-fit boundaries, no fit before the horizon, floating across cards, `gpu=None`
-  argmin and tie-break) and `advance_order` (important first, then start, then created_at).
+  argmin and tie-break); `earliest_fit_group` (four cards free at different times → the
+  group waits for the fourth; never staggered; lowest-index cards chosen; `count` larger
+  than the box → None); and `advance_order` (important first, then start, then created_at).
+- Partial-card sharing (the third story): 40 GiB booked on the last free card, a second
+  user books the remaining 40 GiB and succeeds; 40 GiB + 41 GiB answers 409.
+- Groups: a group never advances partially; cancelling a not-yet-started member cancels the
+  set; releasing an under-way member truncates only that row.
 - `tests/test_claims_advance.py` — an early release pulls the next slot earlier inside the
   same transaction; a natural end does **not** (nothing to advance); duration is preserved;
   an advanced booking keeps its id; cascading advances re-evaluate against the updated
