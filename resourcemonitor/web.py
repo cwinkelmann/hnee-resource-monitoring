@@ -49,7 +49,10 @@ _DRAIN_TIMEOUT_S = 1
 _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
                                  "/api/vram", "/api/timeline", "/api/users", "/healthz"}
-_CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note", "priority")
+_CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note", "priority",
+                 "auto_advance", "duration_minutes", "not_later_than", "count",
+                 "notice_seconds")
+MAX_DURATION_MIN = 14 * 24 * 60
 _QUICK = "/api/claims/quick"
 _QUICK_FIELDS = ("user", "gpu")
 _CLAIM_ERRORS = {400: "invalid", 404: "not found", 409: "conflict"}
@@ -202,6 +205,8 @@ class _Handler(BaseHTTPRequestHandler):
                 slots.release()
         except BadRequest:
             self._json(400, {"error": "bad request"})
+        except ClaimError as e:
+            self._claim_error(e)
         except NoHistory:
             if path == "/healthz":
                 self._json(503, {"ok": False})
@@ -234,12 +239,15 @@ class _Handler(BaseHTTPRequestHandler):
                 made = self._create(body)
                 self._json(201, {
                     "claim": made.booking.to_json(),
+                    "claims": [b.to_json() for b in made.bookings],
                     "takes": [{**t, "start": t["start"].isoformat(),
                                "end": t["end"].isoformat(),
                                "vram_gib": round(t["vram_mib"] / MIB_PER_GIB, 1)}
                               for t in made.takes],
                     "adjusted_start": None if made.adjusted_start is None
-                    else made.adjusted_start.isoformat()})
+                    else made.adjusted_start.isoformat(),
+                    "assigned_later": made.assigned_later,
+                    "revoked": made.revoked})
             else:
                 if body:
                     raise ClaimError(400, "unknown field")
@@ -250,10 +258,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._drain()
             self._json(e.status, e.body)
         except ClaimError as e:
-            self._json(e.status, {"error": _CLAIM_ERRORS[e.status], "detail": e.detail})
+            self._claim_error(e)
         except Exception as e:
             print(f"request failed: {e.__class__.__name__}", flush=True)
             self._json(500, {"error": "internal"})
+
+    def _claim_error(self, e: ClaimError) -> None:
+        """The fixed {error, detail} shape, plus whatever machine-readable extras the store
+        attached -- `earliest` and `free_now` on a 409 -- which may never overwrite it."""
+        body = {"error": _CLAIM_ERRORS[e.status], "detail": e.detail}
+        body.update({k: v for k, v in e.extra.items() if k not in body})
+        self._json(e.status, body)
 
     def _drain(self) -> None:
         """Swallow up to 64 KiB of an unread body (1 s in total), then close after replying.
@@ -310,24 +325,66 @@ class _Handler(BaseHTTPRequestHandler):
         if set(d) - set(_CLAIM_FIELDS):
             raise ClaimError(400, "unknown field")
         user = _field(d, "user", lambda v: isinstance(v, str))
-        gpu = _field(d, "gpu", _is_int)
+        # gpu is optional: absent or null lets the server pick the card.
+        gpu = None if d.get("gpu") is None else _field(d, "gpu", _is_int)
         # VRAM is optional: absent or null books the whole card.
         vram_gib = None if d.get("vram_gib") is None else _field(d, "vram_gib", _is_gib)
-        start = parse_time(_field(d, "start", lambda v: isinstance(v, str)))
-        end = parse_time(_field(d, "end", lambda v: isinstance(v, str)))
+        # start is optional: absent means "the earliest slot that fits".
+        start = None if d.get("start") is None else parse_time(d["start"])
+        end = None if d.get("end") is None else parse_time(d["end"])
+        not_later_than = None if d.get("not_later_than") is None \
+            else parse_time(d["not_later_than"])
+        duration = None
+        if d.get("duration_minutes") is not None:
+            minutes = _field(d, "duration_minutes",
+                             lambda v: _is_int(v) and 1 <= v <= MAX_DURATION_MIN)
+            duration = timedelta(minutes=minutes)
         note = d.get("note")
         if note is not None and not isinstance(note, str):
             raise ClaimError(400, "missing or invalid field 'note'")
         priority = d.get("priority", "lendable")
         if not isinstance(priority, str):
             raise ClaimError(400, "priority must be lendable or important")
-        card_mib = self._card_mib(gpu)
+        auto_advance = d.get("auto_advance", False)
+        if not isinstance(auto_advance, bool):
+            raise ClaimError(400, "auto_advance must be true or false")
+        count = d.get("count", 1)
+        if not _is_int(count) or not 1 <= count <= GPU_COUNT:
+            raise ClaimError(400, f"count must be a whole number of GPUs, 1..{GPU_COUNT}")
+        notice = d.get("notice_seconds")
+        if notice is not None and (not _is_int(notice) or notice < 0):
+            raise ClaimError(400,
+                             "notice_seconds must be a whole number of seconds, 0 or more")
+        cards = self._cards()
+        card_mib = cards.get(gpu, DEFAULT_CARD_MIB) if gpu is not None \
+            else max(cards.values(), default=DEFAULT_CARD_MIB)
         vram_mib = card_mib if vram_gib is None else round(vram_gib * MIB_PER_GIB)
-        return self._store().create(user=user, gpu=gpu, vram_mib=vram_mib,
-                                    start=start, end=end, note=note,
+        return self._store().create(user=user, gpu=gpu, vram_mib=vram_mib, start=start,
+                                    end=end, duration=duration, note=note,
                                     ip=self.client_address[0], now=self.server.clock(),
                                     card_mib=card_mib, priority=priority,
-                                    grace=self._grace())
+                                    grace=self._grace(), auto_advance=auto_advance,
+                                    not_later_than=not_later_than, count=count,
+                                    cards=cards)
+
+    def _cards(self) -> dict[int, int]:
+        """Each GPU's total MiB from the latest poll; the default card size for every GPU
+        if the history has never seen one. One query instead of eight, because assignment
+        needs them all. t14 answers {0: 16376}; carrot answers eight entries."""
+        cards: dict[int, int] = {}
+        try:
+            conn = self._conn()
+            try:
+                for gpu, total in conn.execute(
+                        "SELECT gpu, total_mib FROM gpu_samples "
+                        "WHERE ts = (SELECT MAX(ts) FROM polls)"):
+                    if 0 <= gpu < GPU_COUNT and total:
+                        cards[gpu] = total
+            finally:
+                conn.close()
+        except (NoHistory, sqlite3.Error):
+            pass
+        return cards or {g: DEFAULT_CARD_MIB for g in range(GPU_COUNT)}
 
     def _grace(self) -> timedelta:
         """booking.grace_minutes from policy.toml; the default if the file is missing or bad."""
