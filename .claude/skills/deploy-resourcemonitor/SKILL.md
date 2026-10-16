@@ -128,6 +128,22 @@ ssh cwinkelmann@10.188.1.1 'curl -s http://10.188.1.1:8765/healthz'
 Then open http://10.188.1.1:8765. Firewall caveat: if `healthz` works on carrot but the
 LAN cannot reach port 8765, ask carrot's admin to open it; do not change the firewall yourself.
 
+## Acceptance run before going live
+
+After the dry run and before enabling the unit, drive the booking path end to end:
+
+```bash
+ssh -o BatchMode=yes cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && \
+  ~/miniconda3/envs/resourcemonitor/bin/python deploy/acceptance-slots.py \
+  --base http://10.188.1.1:8765 --user cwinkelmann --gib 20'
+```
+
+It books, parks a watcher, has an important booking take the card, checks the notification
+arrives in under two seconds, and releases everything again. It **refuses to run** until
+`watch` has recorded at least one poll: with no history the server falls back to eight
+81559 MiB cards, so on any host with smaller or fewer GPUs the run would be meaningless.
+Each run spends about a dozen writes of the per-IP budget (3600/h).
+
 ## Bookings
 
 GPU bookings live in `~/.local/state/resourcemonitor/claims.sqlite`, created and written only

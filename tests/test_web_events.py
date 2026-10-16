@@ -182,3 +182,27 @@ def test_the_watcher_is_woken_when_the_booking_is_cancelled(live):
     t.join(20)
     assert got[0][0] == 200
     assert got[0][1]["event"] == "cancelled"
+
+
+def test_a_watched_victim_is_taken_at_once_over_http(live):
+    """The integration the unit tests cannot reach: claims.create() must ask the server's
+    own Watchers registry whether a victim is listening. With that wiring missing, every
+    victim keeps the full grace_minutes and an important booking revokes nothing."""
+    srv, base = live
+    victim = _book(base)                       # lendable, notice_seconds=0
+    got = []
+    t = threading.Thread(target=lambda: got.append(
+        _get(f"{base}/api/claims/{victim['id']}/events", timeout=20)))
+    t.start()
+    for _ in range(100):
+        if srv.watchers.attached(victim["id"]):
+            break
+        time.sleep(0.02)
+    status, body = _post(base + "/api/claims",
+                         {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 79,
+                          "duration_minutes": 60, "priority": "important"})
+    assert status == 201
+    assert body["claim"]["start"] == T0.isoformat()      # now, not now + 30 minutes
+    assert [r["id"] for r in body["revoked"]] == [victim["id"]]
+    t.join(20)
+    assert got[0][1]["event"] == "taken"

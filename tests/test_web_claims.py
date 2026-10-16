@@ -243,8 +243,8 @@ def test_missing_content_length_is_413(live):
         conn.close()
 
 
-def test_rate_limit_is_429_after_30_writes(live, monkeypatch):
-    assert web._RateLimiter().limit == 30 and web._RateLimiter().window_s == 3600
+def test_rate_limit_is_429_once_the_budget_is_spent(live, monkeypatch):
+    assert web._RateLimiter().limit == 3600 and web._RateLimiter().window_s == 3600
     monkeypatch.setattr(web, "_WRITES", web._RateLimiter(limit=2))
     assert _post(live + "/api/claims", _booking(gpu=1))[0] == 201
     assert _post(live + "/api/claims", _booking(gpu=2))[0] == 201

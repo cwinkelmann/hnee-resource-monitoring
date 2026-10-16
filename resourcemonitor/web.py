@@ -64,9 +64,13 @@ _CLAIM_ERRORS = {400: "invalid", 404: "not found", 409: "conflict"}
 
 
 class _RateLimiter:
-    """At most `limit` writes per client IP in any rolling `window_s` (in memory)."""
+    """At most `limit` writes per client IP in any rolling `window_s` (in memory).
 
-    def __init__(self, limit: int = 30, window_s: float = 3600):
+    3600/h is one write a second: a runaway-loop backstop, not a quota. The real load is
+    a job booking and releasing its own slot -- 13,000 one-hour jobs at 32 concurrent
+    slots is about 64 writes an hour, and a fleet starting at once is a burst of 32."""
+
+    def __init__(self, limit: int = 3600, window_s: float = 3600):
         self.limit = limit
         self.window_s = window_s
         self._hits: dict[str, deque] = {}
@@ -424,7 +428,12 @@ class _Handler(BaseHTTPRequestHandler):
                                     grace=self._grace(), auto_advance=auto_advance,
                                     not_later_than=not_later_than, count=count,
                                     cards=cards, max_pending=self._max_pending(),
-                                    notice_seconds=notice)
+                                    notice_seconds=notice,
+                                    # Whether a victim is actually listening right now: a
+                                    # declared notice counts only while its watcher is
+                                    # parked, so a crashed job cannot hand its card away
+                                    # instantly on a promise nobody is left to keep.
+                                    watching=self.server.watchers.attached)
 
     def _cards(self) -> dict[int, int]:
         """Each GPU's total MiB from the latest poll; the default card size for every GPU

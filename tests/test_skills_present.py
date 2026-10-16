@@ -163,3 +163,13 @@ def test_guard_script_never_posts_and_prefers_the_units():
     assert "enable-linger" in guard, "must say how to get the supervised path back"
     assert "run-resourcemonitor.sh" in guard, "host config must not be duplicated here"
     assert "miniconda3" not in code, "the interpreter choice belongs to the wrapper"
+
+
+def test_the_acceptance_script_is_stdlib_only_and_never_posts_to_slack():
+    src = Path("deploy/acceptance-slots.py").read_text()
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    for banned in ("requests", "SLACK", "webhook", "pynvml"):
+        assert banned not in code, banned
+    assert "urllib.request" in code
+    assert "/api/claims" in code and "/events" in code and "/release" in code
+    assert "/api/capacity" in code
