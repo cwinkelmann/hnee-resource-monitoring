@@ -152,3 +152,36 @@ def test_every_group_member_is_an_ordinary_row_the_next_booking_respects(store):
     _assign(store, gpu=None, count=8, vram_mib=79 * 1024)
     later = _assign(store, gpu=None, vram_mib=79 * 1024)
     assert later.booking.start == T0 + H
+
+
+def test_a_user_may_not_hold_more_than_max_pending_future_rows(store):
+    # Somebody else holds the card, so every booking below is in the future and counts.
+    book(store, gpu=4, gib=79, start=T0, hours=4)
+    for _ in range(3):
+        _assign(store, max_pending=3, vram_mib=79 * 1024)
+    with pytest.raises(ClaimError) as e:
+        _assign(store, max_pending=3, vram_mib=79 * 1024)
+    assert e.value.status == 409
+    assert "3" in e.value.detail                 # the message quotes the real limit
+    assert e.value.extra["max_pending_per_user"] == 3
+    assert e.value.extra["pending"] == 3
+
+
+def test_a_started_booking_does_not_count_against_the_limit(store):
+    running = _assign(store, max_pending=1, vram_mib=79 * 1024)
+    assert running.booking.start == T0           # starts now, so it is not pending
+    _assign(store, max_pending=1, vram_mib=79 * 1024)      # the first future one is fine
+
+
+def test_the_limit_is_per_user(store):
+    _assign(store, max_pending=1, vram_mib=79 * 1024)
+    _assign(store, max_pending=1, vram_mib=79 * 1024)
+    _assign(store, user="dorian.zwanzig", max_pending=1, vram_mib=79 * 1024)
+
+
+def test_a_group_counts_as_one_row_per_card(store):
+    with pytest.raises(ClaimError) as e:
+        store.create(user="cwinkelmann", gpu=None, vram_mib=79 * 1024, start=None,
+                     end=None, duration=H, note=None, ip="10.0.0.1", now=T0, count=4,
+                     max_pending=3, cards={g: CARD for g in range(8)})
+    assert e.value.status == 409

@@ -18,6 +18,16 @@ class Policy:
     cooldown_s: int
     channel: str
     grace_minutes: int = 30        # notice an important booking gives a running lendable one
+    max_pending_per_user: int = 16  # future bookings one user may hold at once
+    max_watchers: int = 64          # parked /events connections, ~2x carrot's slot count
+
+
+def _bounded(raw: dict, key: str, default: int, lo: int, hi: int) -> int:
+    """A whole number from [booking], or the default. Bad policy fails at load time."""
+    v = raw.get("booking", {}).get(key, default)
+    if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
+        raise ValueError(f"booking.{key} must be a whole number, {lo}..{hi}")
+    return v
 
 
 def load_policy(path: Path | str) -> Policy:
@@ -51,4 +61,6 @@ def load_policy(path: Path | str) -> Policy:
         cooldown_s=int(n["cooldown_s"]),
         channel=str(n["channel"]),
         grace_minutes=grace,
+        max_pending_per_user=_bounded(raw, "max_pending_per_user", 16, 1, 10_000),
+        max_watchers=_bounded(raw, "max_watchers", 64, 1, 4_096),
     )

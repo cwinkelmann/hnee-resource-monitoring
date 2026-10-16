@@ -417,7 +417,8 @@ class ClaimsStore:
                priority: str = "lendable", grace: timedelta = DEFAULT_GRACE,
                duration: timedelta | None = None, auto_advance: bool = False,
                not_later_than: datetime | None = None, count: int = 1,
-               cards: dict[int, int] | None = None) -> Created:
+               cards: dict[int, int] | None = None,
+               max_pending: int | None = None) -> Created:
         """Book, or raise ClaimError. With start=None the server assigns the earliest slot
         that fits and the booking never fails for lack of capacity; with an explicit start
         the old behaviour is kept exactly, 409 included. An important booking that would
@@ -458,6 +459,19 @@ class ClaimsStore:
             conn = self._conn
             conn.execute("BEGIN IMMEDIATE")
             try:
+                if max_pending is not None:
+                    # Counted in rows, so a four-card group costs four. Without this, a
+                    # 13,000-job pipeline books the whole calendar and a colleague who
+                    # needs 80 GiB is offered a slot a fortnight out.
+                    held = conn.execute(
+                        "SELECT COUNT(*) FROM claims WHERE user = ? AND cancelled_at IS "
+                        "NULL AND start > ?", (user, now.isoformat())).fetchone()[0]
+                    if held + count > max_pending:
+                        raise ClaimError(409,
+                                         f"you already hold {held} bookings that have not "
+                                         f"started; the limit is {max_pending}",
+                                         {"max_pending_per_user": max_pending,
+                                          "pending": held})
                 if start is None:
                     rows = [_row(r) for r in conn.execute(
                         f"SELECT {_COLUMNS} FROM claims WHERE cancelled_at IS NULL "

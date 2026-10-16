@@ -373,7 +373,7 @@ class _Handler(BaseHTTPRequestHandler):
                                     card_mib=card_mib, priority=priority,
                                     grace=self._grace(), auto_advance=auto_advance,
                                     not_later_than=not_later_than, count=count,
-                                    cards=cards)
+                                    cards=cards, max_pending=self._max_pending())
 
     def _cards(self) -> dict[int, int]:
         """Each GPU's total MiB from the latest poll; the default card size for every GPU
@@ -438,6 +438,15 @@ class _Handler(BaseHTTPRequestHandler):
                          "earliest": None if hit is None else hit[0].isoformat(),
                          "gpu": None if hit is None else hit[1][0],
                          "gpus": [] if hit is None else hit[1]})
+
+    def _max_pending(self) -> int:
+        """booking.max_pending_per_user from policy.toml; the default if the file is
+        missing or bad. Without it, 13,000 jobs booking at once own the calendar for a
+        fortnight and the 80 GiB request is offered a slot in two weeks."""
+        try:
+            return load_policy(self.server.policy_path).max_pending_per_user
+        except Exception:
+            return 16
 
     def _grace(self) -> timedelta:
         """booking.grace_minutes from policy.toml; the default if the file is missing or bad."""

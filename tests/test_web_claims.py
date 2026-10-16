@@ -713,3 +713,14 @@ def test_capacity_rejects_rubbish(live):
               "?surprise=1"):
         status, _, _ = _get_status(live + "/api/capacity" + q)
         assert status == 400
+
+
+def test_the_pending_limit_answers_409_over_http(live, tmp_path):
+    # the live fixture's policy.toml is empty, so the default 16 applies; book 16 futures
+    _post(live + "/api/claims", _booking(vram_gib=79, start=S, end=E))
+    bodies = [_post(live + "/api/claims", _booking(user="cwinkelmann", vram_gib=79,
+                                                   start=None, end=None,
+                                                   duration_minutes=60))
+              for _ in range(17)]
+    assert bodies[-1][0] == 409
+    assert json.loads(bodies[-1][2])["max_pending_per_user"] == 16
