@@ -726,3 +726,11 @@ def test_the_pending_limit_answers_409_over_http(live, tmp_path):
               for _ in range(17)]
     assert bodies[-1][0] == 409
     assert json.loads(bodies[-1][2])["max_pending_per_user"] == 16
+
+
+def test_capacity_rejects_a_non_ascii_digit_with_400_not_500(live):
+    """int('²') raises outside the guard, so isdigit() alone turns a typo into a 500 --
+    and '٣' would be accepted as 3. _hours() in this file already checks isascii()."""
+    for bad in ("%C2%B2", "%D9%A3"):           # percent-encoded: superscript two, Arabic-Indic three
+        status, _, _ = _get_status(live + "/api/capacity?gpu=" + bad)
+        assert status == 400, bad

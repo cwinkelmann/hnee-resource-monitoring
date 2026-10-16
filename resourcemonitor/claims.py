@@ -562,12 +562,26 @@ class ClaimsStore:
                         start = start.replace(second=0, microsecond=0) + timedelta(minutes=1)
                     if asked is None:
                         # An assigned window keeps the duration it asked for: the job wanted
-                        # an hour, not whatever is left of one. An explicit window keeps
-                        # today's behaviour and is simply shortened.
+                        # an hour, not whatever is left of one. The whole window has moved,
+                        # so the fit must be computed again -- `overlapping` was read for
+                        # the window earliest_fit first offered, and a row that overlaps
+                        # only the new one would be invisible to a re-check against it.
+                        again = earliest_fit_group(fit_rows, count, vram_mib, duration,
+                                                   cards, start,
+                                                   gpus=None if group_gpus is None
+                                                   else group_gpus)
+                        if again is None:
+                            raise ClaimError(409, "no slot fits after the notice its "
+                                                  f"victims are owed ({MAX_DAYS} days "
+                                                  "checked)",
+                                             {"earliest": None,
+                                              "free_now": _free_now(fit_rows, cards, gpu,
+                                                                    now)})
+                        start, group_gpus = again
+                        gpu, card_mib = group_gpus[0], cards[group_gpus[0]]
                         end = start + duration
-                        _check_capacity([b for b in overlapping if b.priority == priority
-                                         or priority == "lendable"], gpu, vram_mib, start,
-                                        end, card_mib, priority)
+                        overlapping = [b for b in rows if b.gpu == gpu
+                                       and b.start < end and b.end > start]
                         assigned_later = start > now
                     elif end <= start:
                         raise ClaimError(409, "this takes from a lendable booking that is "
@@ -682,15 +696,24 @@ class ClaimsStore:
             effective = after.get(v.id, v.vram_mib)
             if effective >= v.vram_mib:
                 continue
-            truncated = False
+            truncated = cancelled = False
             if effective < MIB_PER_GIB:
-                cur = conn.execute("UPDATE claims SET end = ? WHERE id = ? AND end > ?",
-                                   (at.isoformat(), v.id, at.isoformat()))
-                truncated = cur.rowcount > 0
+                if v.start >= at:
+                    # It never ran: truncating would leave end == start, a row
+                    # _validate_window would reject and the calendar cannot draw.
+                    cur = conn.execute(
+                        "UPDATE claims SET cancelled_at = ?, cancelled_ip = ? "
+                        "WHERE id = ? AND cancelled_at IS NULL",
+                        (at.isoformat(), booking_row.created_ip, v.id))
+                    cancelled = truncated = cur.rowcount > 0
+                else:
+                    cur = conn.execute("UPDATE claims SET end = ? WHERE id = ? AND end > ?",
+                                       (at.isoformat(), v.id, at.isoformat()))
+                    truncated = cur.rowcount > 0
             out.append({"id": v.id, "user": v.user, "gpu": v.gpu,
                         "effective_mib": effective, "lost_mib": v.vram_mib - effective,
                         "at": at.isoformat(), "by": [booking_row.user],
-                        "truncated": truncated})
+                        "truncated": truncated, "cancelled": cancelled})
         return out
 
     def release(self, claim_id: int, *, end: datetime | None, ip: str, now: datetime,
@@ -709,7 +732,15 @@ class ClaimsStore:
         if b.cancelled_at is not None:
             raise ClaimError(409, "already cancelled")
         if b.start > now:
-            return Released(self.cancel(claim_id, ip=ip, now=now, cards=cards))
+            if new_end > b.start:
+                # Giving back a booking that has not started means cancelling it. Asking
+                # for a *later* end is an extension, and routing that to cancel() would
+                # destroy the booking the caller was trying to lengthen -- while answering
+                # 200.
+                raise ClaimError(409, "this booking has not started: release it with no "
+                                      "end to cancel it, or book the later window")
+            booking, moved = self._cancel_inner(claim_id, ip=ip, now=now, cards=cards)
+            return Released(booking, moved)
         with self._lock:
             conn = self._conn
             conn.execute("BEGIN IMMEDIATE")
@@ -799,6 +830,11 @@ class ClaimsStore:
 
     def cancel(self, claim_id: int, *, ip: str, now: datetime,
                cards: dict[int, int] | None = None) -> Booking:
+        """See _cancel_inner. The cancel route reports no moves, so it drops them."""
+        return self._cancel_inner(claim_id, ip=ip, now=now, cards=cards)[0]
+
+    def _cancel_inner(self, claim_id: int, *, ip: str, now: datetime,
+                      cards: dict[int, int] | None = None) -> tuple[Booking, list[dict]]:
         """Idempotent: cancelling an already-cancelled booking changes nothing.
         Cancelling a not-yet-started member of a group cancels the whole set -- a group
         exists so its cards are held together, and a partial group would sit on idle cards
@@ -820,8 +856,9 @@ class ClaimsStore:
                                 (now.isoformat(), ip, claim_id))
                 row = conn.execute(f"SELECT {_COLUMNS} FROM claims WHERE id = ?",
                                       (claim_id,)).fetchone()
+                moved = []
                 if row is not None:
-                    self._advance(conn, now, cards or _all_cards())
+                    moved = self._advance(conn, now, cards or _all_cards())
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
@@ -829,7 +866,7 @@ class ClaimsStore:
                 raise
         if row is None:
             raise ClaimError(404, "no such booking")
-        return _row(row)
+        return _row(row), moved
 
     def get(self, claim_id: int) -> Booking | None:
         with self._lock:

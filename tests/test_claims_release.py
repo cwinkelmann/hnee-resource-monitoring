@@ -95,3 +95,27 @@ def test_releasing_an_under_way_group_member_truncates_only_that_row(store):
     store.release(made.bookings[0].id, end=None, ip="10.0.0.1", now=T0 + H)
     assert store.get(made.bookings[0].id).end == T0 + H
     assert store.get(made.bookings[1].id).end == T0 + timedelta(hours=4)
+
+
+def test_releasing_a_pending_booking_to_a_later_end_never_cancels_it(store):
+    """An extension is not a release. Routing it to cancel() destroys the booking the
+    caller was trying to lengthen, and answers 200 while doing it."""
+    b = book(store, start=T0 + timedelta(hours=2), hours=1, now=T0)
+    with pytest.raises(ClaimError) as e:
+        store.release(b.id, end=T0 + timedelta(hours=5), ip="10.0.0.1", now=T0)
+    assert e.value.status == 409
+    assert store.get(b.id).cancelled_at is None
+
+
+def test_releasing_a_pending_booking_reports_what_it_advanced(store):
+    # The card is busy now and booked solid for four hours after that, so the waiting slot
+    # sits behind both. Giving the pending one back is what frees the gap.
+    book(store, gpu=4, gib=79, start=T0, hours=1)
+    blocker = book(store, gpu=4, gib=79, start=T0 + timedelta(hours=1), hours=4, now=T0)
+    waiting = store.create(user="cwinkelmann", gpu=4, vram_mib=79 * 1024, start=None,
+                           end=None, duration=H, note=None, ip="10.0.0.1", now=T0,
+                           auto_advance=True).booking
+    assert waiting.start == T0 + timedelta(hours=5)
+    out = store.release(blocker.id, end=None, ip="10.0.0.1", now=T0)
+    assert out.booking.cancelled_at is not None          # it had not started
+    assert [a["id"] for a in out.advanced] == [waiting.id]

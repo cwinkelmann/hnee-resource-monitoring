@@ -206,3 +206,30 @@ def test_a_watched_victim_is_taken_at_once_over_http(live):
     assert [r["id"] for r in body["revoked"]] == [victim["id"]]
     t.join(20)
     assert got[0][1]["event"] == "taken"
+
+
+def test_a_dropped_connection_retires_the_watch_at_once(live, monkeypatch):
+    """The parked connection is the only liveness signal there is. If a dropped socket
+    leaves the watch registered, create() keeps promising instant revocation for a job
+    that is gone -- and a live job whose connection blipped loses its card with no notice."""
+    import socket as _socket
+    # The fast_hold fixture shortens the hold to a second, which would answer 204 on its
+    # own and make this pass without any detection at all.
+    monkeypatch.setattr(web, "EVENT_HOLD_S", 30)
+    srv, base = live
+    claim = _book(base)
+    port = srv.server_address[1]
+    sock = _socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.sendall(f"GET /api/claims/{claim['id']}/events HTTP/1.1\r\n"
+                 f"Host: 127.0.0.1:{port}\r\n\r\n".encode())
+    for _ in range(200):
+        if srv.watchers.attached(claim["id"]):
+            break
+        time.sleep(0.02)
+    assert srv.watchers.attached(claim["id"]) is True
+    sock.close()
+    for _ in range(200):                       # well inside the 60 s hold
+        if not srv.watchers.attached(claim["id"]):
+            break
+        time.sleep(0.05)
+    assert srv.watchers.attached(claim["id"]) is False

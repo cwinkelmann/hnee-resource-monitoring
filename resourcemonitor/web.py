@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 import re
+import select
 import socket
 import sqlite3
 import threading
@@ -51,6 +52,7 @@ _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
 _RELEASE = re.compile(r"^/api/claims/(\d{1,9})/release$", re.ASCII)
 _EVENTS = re.compile(r"^/api/claims/(\d{1,9})/events$", re.ASCII)
 EVENT_HOLD_S = 60        # how long one request is parked before the client reconnects
+EVENT_POLL_S = 0.5       # how often a parked request checks whether its client is gone
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
                                  "/api/vram", "/api/timeline", "/api/users", "/healthz",
                                  "/api/capacity"}
@@ -319,11 +321,48 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(503, {"error": "busy"})
             return
         with watch:
-            event = watch.wait(EVENT_HOLD_S)
+            event, gone = self._park(watch)
+        if gone:
+            # Nothing to answer and nobody to answer to; writing would only raise.
+            self.close_connection = True
+            return
         if event is None:
             self._send(204, b"", "application/json")
         else:
             self._json(200, event)
+
+    def _park(self, watch) -> tuple[dict | None, bool]:
+        """Wait for an event, in slices, giving up as soon as the client disconnects.
+        Returns (event, client_gone).
+
+        The slices are the liveness signal. A parked connection is the only evidence the
+        server has that a job is alive, and claims.create() reads it through
+        Watchers.attached to decide whether a declared notice counts. If a dropped socket
+        left the watch registered until the hold expired, the server would keep promising
+        instant revocation on behalf of a job that is gone -- and a live job whose
+        connection blipped could lose its card with no notice at all."""
+        deadline = time.monotonic() + EVENT_HOLD_S
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None, False
+            event = watch.wait(min(EVENT_POLL_S, left))
+            if event is not None:
+                return event, False
+            if self._peer_gone():
+                return None, True
+
+    def _peer_gone(self) -> bool:
+        """Has the client closed its end? A readable socket that peeks empty is a closed
+        one; a GET has no body, so anything else readable is a pipelined request we are
+        not going to serve on this connection anyway."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
 
     def _claim_error(self, e: ClaimError) -> None:
         """The fixed {error, detail} shape, plus whatever machine-readable extras the store
@@ -473,7 +512,8 @@ class _Handler(BaseHTTPRequestHandler):
         cards = self._cards()
         gpu = None
         if "gpu" in p:
-            if not p["gpu"].isdigit() or int(p["gpu"]) not in cards:
+            if not (p["gpu"].isascii() and p["gpu"].isdigit()) \
+                    or int(p["gpu"]) not in cards:
                 raise ClaimError(400, "GPU must be 0–7")
             gpu = int(p["gpu"])
         try:

@@ -184,3 +184,33 @@ def test_the_freed_tail_advances_someone_else(store):
     # the victim ends at `now`, so the important hour runs now..+1h and the waiting slot
     # moves up behind it instead of waiting out the cancelled three hours.
     assert store.get(waiting.id).start == now + H
+
+
+def test_an_assigned_important_window_is_re_checked_after_grace_shifts_it(store):
+    """The shift makes the window the fit was computed for stale: rows that overlap only
+    the *new* window must still be respected, or the card is overbooked."""
+    _lendable(store, notice=None, gib=79, hours=4)              # running, unwatched: 30 min
+    blocker = store.create(user="andre.kliem", gpu=4, vram_mib=79 * 1024,
+                           start=T0 + timedelta(minutes=70), end=T0 + timedelta(hours=5),
+                           note=None, ip="10.0.0.3", now=T0, priority="important",
+                           cards=CARDS).booking
+    made = store.create(user="dorian.zwanzig", gpu=4, vram_mib=79 * 1024, start=None,
+                        end=None, duration=timedelta(minutes=60), note=None,
+                        ip="10.0.0.2", now=T0, priority="important", grace=GRACE,
+                        cards=CARDS)
+    got = made.booking
+    assert got.start >= blocker.end or got.end <= blocker.start
+    assert got.end - got.start == timedelta(minutes=60)
+
+
+def test_a_victim_that_never_ran_is_cancelled_not_left_zero_length(store):
+    victim = store.create(user="cwinkelmann", gpu=4, vram_mib=79 * 1024,
+                          start=T0 + timedelta(hours=1), end=T0 + timedelta(hours=5),
+                          note=None, ip="10.0.0.1", now=T0, priority="lendable",
+                          notice_seconds=0, cards=CARDS).booking
+    store.create(user="dorian.zwanzig", gpu=4, vram_mib=79 * 1024,
+                 start=T0 + timedelta(hours=1), end=T0 + timedelta(hours=2), note=None,
+                 ip="10.0.0.2", now=T0, priority="important", cards=CARDS)
+    got = store.get(victim.id)
+    assert got.cancelled_at is not None          # it never ran; a zero-length row is junk
+    assert got.end > got.start
