@@ -5,13 +5,16 @@ watch file is empty (or absent); the parent stops it as soon as the
 file gains content.
 """
 
+import sys
 import threading
 import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from resourcemonitor.revocation_mvp import run_job
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from revocation_mvp import run_job
 
 
 class RunJobTest(unittest.TestCase):
