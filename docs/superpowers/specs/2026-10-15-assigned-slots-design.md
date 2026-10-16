@@ -24,6 +24,7 @@ From `UserStories.md` (8 GPU, 224 CPU, 1 TB RAM server):
 | Alice wants a specific window; Bob already holds 5 cards for 6 h | The booking **fails**, as today — an explicit `start` still answers 409. The error carries `earliest` and `free_now` so her two options, *book later* or *book less*, are in the answer instead of guesswork. |
 | Alice needs **4 GPUs uninterrupted** and does not care when | An **atomic group booking**: the earliest instant where all four fit for the whole duration, assigned as a set. Her script waits and starts when the slot opens. Without atomicity she would be assigned cards at four different times and sit holding idle ones. |
 | Alice books 40 GiB, 40 GiB remain free; Bob should still run | Already true: `_check_capacity` sums VRAM per card, so partial-card sharing works. Pinned by an explicit test so it stays true. |
+| Alice runs **13,000 jobs at the lowest priority** and accepts that others can kill a running one and take the card; her queue carries on afterwards | **Revocation** (below). Her jobs book `lendable` with `notice_seconds`, an important booking takes the card after that notice rather than after the global 30-minute grace, the victim's row is truncated at the instant it loses the VRAM, and her own next slot advances into the gap. Because she books one slot at a time, a smaller booking by someone else fits beside hers without waiting at all. |
 
 **CPU and RAM are deliberately not bookable.** PR #6 monitors them for display. With 224
 cores and 1 TB against 8 cards, the GPU is the binding constraint; booking cores and RAM
@@ -52,12 +53,18 @@ card, 32 on carrot, ~17 days of work).
   simplification and the reason the rest is small (see below).
 - **No authentication.** Honour system, like the rest of the server. `important` is a claim
   about need, enforced socially and by being visible.
-- **No background process.** Nothing new runs; see "When a slot moves earlier".
+- **No background process.** No timer, thread pool or cron: a slot advances inside the
+  transaction of someone's early release, and a watch connection is an ordinary request
+  parked in the server that already serves them. See "When a slot moves earlier".
 - **No cross-host queue.** t14 (192.168.188.88) cannot reach carrot (10.188.1.x), so it is
   its own booking domain. One queue across hosts is a separate design.
-- **Not a replacement for takes.** The `taken`/grace path (PR #5) remains for a job that
-  must die now. Assigned slots are the consensual path and remove the need to take anything
-  for the 13,000-job workload.
+- **No preemption of anything but a booking.** Revocation truncates a row and tells the
+  job; the process keeps running until its own code stops it. This repo never kills,
+  signals or reprioritises, and there is no sudo on these hosts to do it with anyway.
+- **It does not replace takes, it finishes them.** The `taken`/`allocate()` arithmetic from
+  PR #5 already decides who loses VRAM to whom; what was missing was writing that down on
+  the row and telling the victim. Assigned slots remain the consensual path and are what
+  the 13,000-job workload uses most of the time.
 
 ## Why there is no queue table
 
@@ -82,8 +89,9 @@ Schema **v3 → v4** adds two columns to `claims`, following the existing `_migr
 pattern on main (`PRAGMA user_version`, one transaction, additive only):
 
 ```sql
-ALTER TABLE claims ADD COLUMN auto_advance INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE claims ADD COLUMN group_id     TEXT;   -- NULL for a single-card booking
+ALTER TABLE claims ADD COLUMN auto_advance   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claims ADD COLUMN group_id       TEXT;   -- NULL for a single-card booking
+ALTER TABLE claims ADD COLUMN notice_seconds INTEGER; -- NULL: no watcher, use grace_minutes
 ```
 
 Main is already at `SCHEMA_VERSION = 3`: v1 → v2 added `kind`, v2 → v3 added `priority`.
@@ -91,6 +99,11 @@ This is the fourth step and the same shape as the previous two.
 
 `auto_advance = 1` means "if capacity frees earlier, move this booking earlier". It must be
 stored, because the move happens later, during someone else's release.
+
+`notice_seconds` is how much warning this booking's owner promises to need before giving up
+the card (see *Revocation*). NULL means nobody is listening, so `grace_minutes` applies — the
+behaviour of every booking that exists today. It must be stored for the same reason: the
+important booking that reads it is created later, by someone else.
 
 Everything else the feature needs is already on the row on main: `user`, `gpu`, `vram_mib`,
 `start`, `end`, `kind`, and `priority` with `PRIORITIES = ("lendable", "important")`.
@@ -184,6 +197,119 @@ the releaser is told who benefited — the social feedback that makes releasing 
 A moved booking keeps its id, so a sleeping job's poll sees a new `start` on the row it
 already knows.
 
+## Revocation: an important booking takes the card now
+
+The fifth story inverts `grace_minutes`. Alice's 13,000 jobs run as `lendable` and accept
+being killed so a colleague can have the card immediately; the policy on main does the
+opposite, pushing the important booking's start 30 minutes out so the running job can finish.
+
+Both are right, for different victims. A booking made in the browser belongs to a person,
+and a person cannot be interrupted — half an hour is the least notice worth offering. A
+booking made by a job that is listening can be cut off in milliseconds. So **notice is a
+property the victim declares, not a wait the requester suffers.**
+
+`notice_seconds` on the row is that promise: *a process of mine is watching and will be off
+the card within this many seconds*. `create()` then computes
+
+```
+start = now + max(effective_notice(v) for v in victims)
+```
+
+over the lendable bookings the new important booking takes — `takes_of()` already returns
+exactly that list — where `effective_notice(v)` is `v.notice_seconds` when a watcher is
+attached to `v` at that moment, and `policy.grace_minutes` otherwise. With no victims the
+start is now, as today. A booking made in the browser leaves `notice_seconds` NULL and
+behaves exactly as it does on main.
+
+The promise counts only while someone is actually listening. A job that declared
+`notice_seconds = 0` and then crashed does not hand its card over instantly: its row is
+treated as unwatched and keeps the full `grace_minutes`. That costs the requester half an
+hour in a rare case, which is the right direction to fail — a stale promise must not be
+allowed to fake a response nobody is there to give.
+
+### What "revoked" means on the row
+
+Nothing is deleted and nothing is killed. The squeeze is already arithmetic on main:
+`allocate()` hands important bookings their full VRAM and gives lendable ones what is left,
+oldest id first — so the **newest** lendable booking shrinks first, and Alice's
+just-started job loses the card rather than the one five hours in. `taken_segments(b, …)`
+already answers *when, how much and by whom* for a given lendable booking.
+
+Revocation is therefore not a new decision, only a written one. At the instant the important
+booking starts, every victim whose effective VRAM has fallen below what it booked gets `end`
+truncated to that instant, exactly as an early `release` does: the used window stays in the
+calendar and the energy ledger, the freed tail becomes bookable, and `advance_order` runs as
+it does after any truncation — so Alice's own next slot may move earlier into the gap she
+just lost. A victim shrunk but not starved (40 GiB taken of 80 booked) is **not** truncated.
+It is notified, and the job decides whether what remains still fits.
+
+### The watch channel
+
+The notification has to reach a process, and it must not be a poll.
+
+```
+GET /api/claims/{id}/events
+```
+
+returns nothing at all until something happens to that booking, then writes one JSON line
+and closes:
+
+```json
+{"event": "taken", "effective_mib": 0, "by": ["dorian.zwanzig"],
+ "deadline": "2026-10-16T14:03:00+02:00"}
+```
+
+Three facts make this the right shape here:
+
+- `web.py` serves on a `ThreadingHTTPServer` with `daemon_threads = True`. A parked request
+  costs one thread and blocks neither the dashboard nor another booking write. A
+  single-threaded `HTTPServer` would have made server push a rewrite instead of a route.
+- **The job dials out.** Measured: t14 (192.168.188.x) has no route to 10.188.x at all, so
+  inbound push to a job is impossible across these hosts. An outbound long-poll inverts the
+  firewall and works from anywhere that can reach the dashboard.
+- The parked connection is a liveness signal for free. When the job dies, TCP tells the
+  server at once — which is how *is a watcher attached?* above gets answered, with no
+  heartbeat protocol to invent.
+
+The hold is capped at 60 s and the client reconnects. That cap is not polling for state: it
+exists so a silently dead TCP path heals, and the notification itself still arrives in
+milliseconds. **Only running jobs watch.** A job waiting for its assigned slot holds no
+connection — 13,000 parked threads is not something we will do — it uses
+`wait_until_start()` on a slow tick, where minutes of latency cost nothing. `policy.toml`
+gains `max_watchers` (default 64, about twice carrot's 32 concurrent slots); past it the
+route answers 503 and the client falls back to polling, so a client bug cannot exhaust the
+thread pool.
+
+### The SDK side
+
+```python
+booking = hrm.book(vram_gib=19.5, hours=1, priority="lendable", notice_seconds=0)
+booking.wait_until_start()
+try:
+    with hrm.watch(booking):       # daemon thread; raises Preempted in the main thread
+        train()
+except hrm.Preempted:
+    checkpoint()
+finally:
+    hrm.release(booking)
+```
+
+`hrm.watch()` runs one daemon thread holding the long-poll. On a `taken` event it raises
+`Preempted` in the job's main thread; without the context manager the event is still
+readable as `booking.taken`. The kill is the job's own doing: ResourceMonitor writes a row,
+and Alice's code, inside Alice's process, decides to stop.
+
+### What this cannot do
+
+**It cannot make a job let go.** ResourceMonitor never kills, signals or reprioritises
+anything; a change that wrote to another user's process would not belong in this repo at
+all. With no sudo and no cgroups on carrot or olive, ever, a cooperative notice is not one
+option among several — it is the ceiling. A job that ignores its revocation keeps the
+memory, and the existing rules catch it: a process holding VRAM on a card its booking no
+longer covers is the same shape as the idle and capacity alarms, and it lands in
+`#gpu-watch` with the user's name on it. Social enforcement, on a box shared by two people
+who know each other.
+
 ## The queue-colonisation problem
 
 This is the one place the design can go wrong, and it needs a decision.
@@ -217,6 +343,10 @@ process — a runaway-loop backstop, not a quota).
 | `POST /api/claims` | existing body, plus optional `auto_advance`, `duration_minutes` (instead of `end`), `not_later_than`; `start` omitted means earliest | `201 {booking}` with the assigned `start`/`end`, and `assigned_later: true` when it does not start now |
 | `POST /api/claims/{id}/release` | `{end: "now" \| ISO-8601}` | `200 {booking, advanced:[{id, user, old_start, new_start}]}` |
 | `GET /api/capacity` | `?gpu=&vram_mib=&duration_minutes=` | `{free_mib, earliest, gpu}` — the one authoritative capacity answer |
+| `GET /api/claims/{id}/events` | long-poll, held up to 60 s | `200 {event, effective_mib, by, deadline}` on a squeeze, `204` on the cap, `503` past `max_watchers` |
+
+The events route is a read, so it costs nothing against the write budget; it is bounded by
+`max_watchers` instead.
 
 Errors keep the `{"error","detail"}` shape and the fixed messages: `400 invalid`,
 `404 not found`, `409 conflict`.
@@ -243,6 +373,9 @@ hrm.release(booking)                       # end = now
   that has not started.
 - `Booking.taken` and `priority` round out the gaps so the SDK can express the
   lendable/important split at all.
+- `book(notice_seconds=…)` declares the warning the job needs, and `hrm.watch(booking)`
+  delivers it (see *Revocation*). Omit both and the booking behaves exactly as one made in
+  the browser.
 
 ### What a job looks like
 
@@ -296,6 +429,14 @@ can see themselves blocking.
 - `tests/test_web_claims.py` additions — `start` omitted means earliest; `assigned_later`;
   `not_later_than` → 409 with the earliest offer; `max_pending_per_user` → 409; `advanced:[]`
   on release.
+- `tests/test_claims_revoke.py` — a starved victim's `end` is truncated to the important
+  booking's start; a victim shrunk but not starved is left alone; `start = now + max(notice)`
+  across several victims; an unwatched victim yields `grace_minutes`; a declared
+  `notice_seconds` is ignored while no watcher is attached; `advance_order` runs on the
+  freed tail; the revoking booking's own creation stays inside one transaction.
+- `tests/test_web_events.py` — the long-poll returns on a squeeze and not before; `204` at
+  the 60 s cap; `404` for an unknown id; `503` past `max_watchers`; a dropped connection
+  clears the watcher so the next revocation sees the booking as unwatched.
 - Migration: a real v3 `claims.sqlite` fixture opened by v4 code gains `auto_advance`,
   keeps every row, and sets `PRAGMA user_version = 4`; a v1 file still migrates all the way.
 - Fairness integration: 32 one-hour slots booked by one user, then an 80 GiB request from
@@ -327,10 +468,13 @@ move to its own branch off main too.
 
 ## Known gaps, recorded deliberately
 
-- **A job that dies while waiting leaves its slot booked.** Nothing reaps it. The existing
-  idle rules (`idle_util_pct`, `idle_grace_s`) already alert on a booked-but-idle card once
-  the window starts; auto-truncating such a booking is a policy change, deliberately not
-  proposed here.
+- **A job that dies while *waiting* leaves its slot booked.** Nothing reaps it: only a
+  running job holds a watch connection, so there is no liveness signal before the window
+  starts. The existing idle rules (`idle_util_pct`, `idle_grace_s`) alert on a
+  booked-but-idle card once it does start; auto-truncating such a booking is a policy
+  change, deliberately not proposed here.
+- **A job can ignore its revocation and keep the memory.** There is no enforcement path and
+  there will not be one — see *What this cannot do*. The alert is the mechanism.
 - A suspended laptop's bookings keep ticking while the job sleeps.
 - Nothing stops a user from marking everything `important`. Visible calendar, social fix.
 - `max_pending_per_user` is a blunt instrument: it limits pipeline depth, not total share.

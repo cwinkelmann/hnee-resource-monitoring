@@ -14,3 +14,6 @@ She does not care when the script runs so her script tries to book and her scrip
 
 ## Alice book 40GB, 40GB remain free
 Assumince 7 GPUs are fully booked and 1 GPU has 40GB free Bbob should be able of running
+
+## Alice needs run 13000 jobs (13000 GPU hours)
+She would want to book all GPUS individually but of course anyone else should have a chance of using the GPUS before the jobs are done. So she configures the lowest priority so others can even cancel the running scripts. So another user would effictevely kill the Process of Alice and take the GPU for their own jobs. The job queue of Alice would continue on her own when the bookings by others are released. SInce she booked just 10GPUs someone else couse use the GPus in parallel if their booking requires less than what is availabe.
