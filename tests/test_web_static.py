@@ -295,3 +295,31 @@ def test_the_page_still_has_no_inline_script_or_external_url():
     assert " style=" not in html
     for f in ("index.html", "app.js", "app.css"):
         assert re.search(r"https?://", (WEB / f).read_text()) is None, f
+
+
+def test_the_bookings_calendar_has_a_range_picker_defaulting_to_24_h():
+    html = (WEB / "index.html").read_text()
+    assert 'id="booking-range"' in html
+    # the same shape as the timeline's picker, and 24 h is the one that starts active
+    assert re.search(r'data-hours="24"[^>]*class="active"', html)
+    for hours in ("24", "168", "336"):
+        assert 'data-hours="%s"' % hours in html, hours
+    assert "Next 14 days" not in html          # the picker says the range now
+
+
+def test_calendar_ticks_are_hours_inside_a_day_and_days_beyond_it():
+    t0 = 1760000000000          # a fixed instant, local midnight-independent
+    short = _node_top_level("calendarTicks", "calendarTicks(%d, 24)" % t0)
+    assert 4 <= len(short) <= 12
+    assert all(":" in tick["label"] for tick in short)
+    long = _node_top_level("calendarTicks", "calendarTicks(%d, 336)" % t0)
+    assert 10 <= len(long) <= 16
+    assert all(":" not in tick["label"] for tick in long)
+
+
+def test_calendar_ticks_stay_inside_the_window():
+    t0 = 1760000000000
+    for hours in (24, 168, 336):
+        ticks = _node_top_level("calendarTicks", "calendarTicks(%d, %d)" % (t0, hours))
+        assert all(t0 <= tick["t"] <= t0 + hours * 3600 * 1000 for tick in ticks)
+        assert [tick["t"] for tick in ticks] == sorted(tick["t"] for tick in ticks)

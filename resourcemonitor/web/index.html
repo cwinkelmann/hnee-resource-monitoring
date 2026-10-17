@@ -78,7 +78,15 @@
         <p id="book-ok" class="book-ok" role="status" hidden></p>
       </form>
       <div class="booking-side">
-        <h3>Next 14 days <span class="hint">bar height = booked share of the card · hatched = lendable, solid = important · click a bar for details</span></h3>
+        <div class="panel-head">
+          <h3>Who has what, when</h3>
+          <div class="controls" id="booking-range">
+            <button type="button" data-hours="24" class="active">24 h</button>
+            <button type="button" data-hours="168">7 d</button>
+            <button type="button" data-hours="336">14 d</button>
+          </div>
+        </div>
+        <p class="hint">bar height = booked share of the card · hatched = lendable, solid = important · click a bar for details</p>
         <div id="booking-calendar" class="chart-wrap"></div>
         <div id="booking-detail" class="booking-detail" hidden></div>
       </div>

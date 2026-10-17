@@ -109,6 +109,35 @@ function bookingState(claim, nowMs) {
   return "assigned";
 }
 
+// Axis ticks for the bookings calendar over `hours` from `nowMs`: clock times inside a
+// day (where midnight ticks would give one line and tell you nothing), local midnights
+// beyond it. Returns [{t, label}] inside the window, in order.
+function calendarTicks(nowMs, hours) {
+  const t1 = nowMs + hours * 3600000;
+  const ticks = [];
+  if (hours <= 24) {
+    const step = 3;                       // every three hours keeps the labels legible
+    const d = new Date(nowMs);
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() + (step - (d.getHours() % step)) % step);
+    if (d.getTime() <= nowMs) d.setHours(d.getHours() + step);
+    for (; d.getTime() <= t1; d.setHours(d.getHours() + step)) {
+      ticks.push({ t: d.getTime(), label: String(d.getHours()).padStart(2, "0") + ":00" });
+    }
+    return ticks;
+  }
+  const d = new Date(nowMs);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 1);
+  for (; d.getTime() <= t1; d.setDate(d.getDate() + 1)) {
+    const wide = hours <= 168;
+    ticks.push({ t: d.getTime(),
+      label: wide ? d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })
+        : String(d.getDate()) });
+  }
+  return ticks;
+}
+
 function vramBucketOrder(points) {
   const seen = new Set();
   for (const p of points) for (const b in p.by_user) if (p.by_user[b] > 0) seen.add(b);
@@ -198,7 +227,6 @@ if (typeof document !== "undefined") (function () {
   const DEFAULT_CARD_MIB = 81559;                                // same fallback as the server
   const DEFAULT_GPUS = [0, 1, 2, 3, 4, 5, 6, 7];
   const H_MS = 3600000, DAY_MS = 24 * H_MS;
-  const CALENDAR_DAYS = 14;
   const CHANGES_SHOWN = 20;
   const USER_KEY = "rm.user";
   const HOLDER_ERROR_MS = 20000;              // how long a card shows a quick-booking error
@@ -212,6 +240,7 @@ if (typeof document !== "undefined") (function () {
     now: null, timeline: null, usage: null, timeseries: null,
     vram: null,              // GET /api/vram?hours=24: VRAM per GPU, by user
     timelineHours: 24, usageDays: 7, usageBy: "day",
+    bookingHours: 24,       // the bookings calendar's window; 24 h by default
     users: [],               // sorted, every user ever seen this session
     inflight: 0, failed: new Set(),
     timelineSeq: 0, usageSeq: 0,
@@ -343,6 +372,10 @@ if (typeof document !== "undefined") (function () {
     return Number.isInteger(g) ? String(g) : g.toFixed(1);
   }
   function priorityOf(c) { return c.priority === "important" ? "important" : "lendable"; }
+  // "24 hours" / "7 days": the window in words, for titles and the empty note.
+  function rangeText(hours) {
+    return hours < 48 ? hours + " hours" : Math.round(hours / 24) + " days";
+  }
   function prioTag(c) {
     const p = priorityOf(c);
     const t = el("span", "prio " + p, p);
@@ -1086,14 +1119,14 @@ if (typeof document !== "undefined") (function () {
     clear(wrap);
     const W = Math.max(560, wrap.clientWidth || 0);
     const labelW = 56, padR = 12, axisH = 22, rowH = 46, rowPad = 3;
-    const t0 = Date.now(), t1 = t0 + CALENDAR_DAYS * DAY_MS;
+    const t0 = Date.now(), t1 = t0 + state.bookingHours * H_MS;
     const ids = gpuIds();
     const H = axisH + ids.length * rowH + 4;
     const plotW = W - labelW - padR;
     const x = (t) => labelW + ((Math.min(Math.max(t, t0), t1) - t0) / (t1 - t0)) * plotW;
     const chart = svg("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img" }, "calendar");
-    addTitle(chart, "Bookings per GPU, now to +" + CALENDAR_DAYS + " days; bar height = booked share of the card;"
-      + " hatched = lendable, solid = important");
+    addTitle(chart, "Bookings per GPU, now to +" + rangeText(state.bookingHours)
+      + "; bar height = booked share of the card; hatched = lendable, solid = important");
     // Hatching for lendable bars: stripes in the panel colour over the (lighter) user colour.
     const defs = svg("defs");
     const hatch = svg("pattern", { id: "cal-hatch", width: 6, height: 6, patternUnits: "userSpaceOnUse",
@@ -1107,17 +1140,11 @@ if (typeof document !== "undefined") (function () {
       if (i % 2 === 0) chart.appendChild(svg("rect", { x: 0, y: y, width: W, height: rowH }, "row-band"));
       chart.appendChild(svgText(8, y + rowH / 2 + 4, "GPU " + gpu, "row-label"));
     });
-    // day ticks at local midnight, the day's name centred in its span
-    const d = new Date(t0);
-    d.setHours(0, 0, 0, 0);
-    for (; d.getTime() < t1; d.setDate(d.getDate() + 1)) {
-      const s = d.getTime(), next = new Date(d); next.setDate(next.getDate() + 1);
-      if (s > t0) chart.appendChild(svg("line", { x1: x(s), x2: x(s), y1: axisH - 4, y2: H - 4 }, "grid"));
-      const xs = x(s), xe = x(next.getTime()), cx = (xs + xe) / 2;
-      if (cx - labelW < 34) continue;               // keep "now" legible
-      const label = xe - xs >= 50 ? d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })
-        : xe - xs >= 18 ? String(d.getDate()) : "";
-      if (label) chart.appendChild(svgText(cx, 13, label, "", "middle"));
+    // hour ticks inside a day, midnight ticks beyond it (see calendarTicks)
+    for (const tick of calendarTicks(t0, state.bookingHours)) {
+      const xs = x(tick.t);
+      chart.appendChild(svg("line", { x1: xs, x2: xs, y1: axisH - 4, y2: H - 4 }, "grid"));
+      if (xs - labelW >= 20) chart.appendChild(svgText(xs, 13, tick.label, "", "middle"));
     }
     chart.appendChild(svg("line", { x1: labelW, x2: labelW, y1: axisH - 4, y2: H - 4 }, "axis-line"));
 
@@ -1179,7 +1206,8 @@ if (typeof document !== "undefined") (function () {
     });
     if (!any) {
       chart.appendChild(svgText(labelW + plotW / 2, axisH + (ids.length * rowH) / 2,
-        "No bookings in the next " + CALENDAR_DAYS + " days — every GPU is free", "empty-note", "middle"));
+        "No bookings in the next " + rangeText(state.bookingHours) + " — every GPU is free",
+        "empty-note", "middle"));
     }
     chart.appendChild(svg("line", { x1: labelW, x2: labelW, y1: axisH - 6, y2: H - 2 }, "now-line"));
     chart.appendChild(svgText(labelW, 13, "now", "now-label", "start"));
@@ -1858,6 +1886,11 @@ if (typeof document !== "undefined") (function () {
       onPick(b.getAttribute(attr));
     });
   }
+
+  bindButtons("booking-range", "data-hours", (v) => {
+    state.bookingHours = Number(v);
+    renderCalendar();          // the fetch already covers 14 days; this is a view change
+  });
 
   bindButtons("timeline-range", "data-hours", (v) => {
     state.timelineHours = Number(v);
