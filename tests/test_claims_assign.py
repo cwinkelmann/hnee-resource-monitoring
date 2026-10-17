@@ -192,3 +192,22 @@ def test_a_group_counts_as_one_row_per_card(store):
                      end=None, duration=H, note=None, ip="10.0.0.1", now=T0, count=4,
                      max_pending=3, cards={g: CARD for g in range(8)})
     assert e.value.status == 409
+
+
+def test_an_explicit_window_with_no_gpu_picks_a_card(store):
+    """`gpu` omitted means "any card" on the assigned path, so it must mean the same
+    with an explicit window -- it used to reach the INSERT and answer 500."""
+    book(store, gpu=0, gib=79, start=T0, hours=4)
+    made = _assign(store, gpu=None, start=T0, end=T0 + H, duration=None,
+                   vram_mib=79 * 1024)
+    assert made.booking.gpu == 1
+    assert made.booking.start == T0
+
+
+def test_an_explicit_window_with_no_gpu_and_no_room_is_409(store):
+    for g in range(8):
+        book(store, gpu=g, gib=79, start=T0, hours=4)
+    with pytest.raises(ClaimError) as e:
+        _assign(store, gpu=None, start=T0, end=T0 + H, duration=None,
+                vram_mib=79 * 1024)
+    assert e.value.status == 409

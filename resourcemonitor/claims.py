@@ -432,7 +432,7 @@ class ClaimsStore:
         up its card; `watching` answers whether a given booking id has a live watcher, and
         is consulted about this booking's victims.
         """
-        from resourcemonitor.slots import earliest_fit, earliest_fit_group
+        from resourcemonitor.slots import earliest_fit, earliest_fit_group, fits
         if priority not in PRIORITIES:
             raise ClaimError(400, "priority must be lendable or important")
         if (end is None) == (duration is None):
@@ -510,10 +510,29 @@ class ClaimsStore:
                                    and b.start < end and b.end > start]
                     snapshot = rows
                 else:
-                    group_gpus = [gpu]
                     start = asked
                     end = start + duration if end is None else _utc(end)
                     _validate_window(start, end, now)
+                    if gpu is None:
+                        # "Any card" has to mean the same thing here as it does on the
+                        # assigned path, or this reaches the INSERT with a NULL gpu and
+                        # answers 500. The window is fixed, so only the card is chosen.
+                        rows = [_row(r) for r in conn.execute(
+                            f"SELECT {_COLUMNS} FROM claims WHERE cancelled_at IS NULL "
+                            "AND start < ? AND end > ?",
+                            (end.isoformat(), start.isoformat()))]
+                        fit_rows = rows if priority != "important" else \
+                            [b for b in rows if b.priority == "important"]
+                        pick = next((g for g in sorted(cards)
+                                     if fits(fit_rows, g, vram_mib, start,
+                                             end - start, cards[g])), None)
+                        if pick is None:
+                            raise ClaimError(409, "no card has room for that window",
+                                             {"earliest": None,
+                                              "free_now": _free_now(fit_rows, cards,
+                                                                    None, now)})
+                        gpu, card_mib = pick, cards[pick]
+                    group_gpus = [gpu]
                     assigned_later = False
                     overlapping = [_row(r) for r in conn.execute(
                         f"SELECT {_COLUMNS} FROM claims WHERE gpu = ? "
