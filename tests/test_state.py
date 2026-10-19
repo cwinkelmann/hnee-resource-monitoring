@@ -9,7 +9,7 @@ T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 def test_first_sighting_sends(tmp_path):
     st = State.load(tmp_path / "s.json")
 
-    assert st.should_send("allocation:dorian:6", T0, 3600) is True
+    assert st.should_send("allocation:duser:6", T0, 3600) is True
 
 
 def test_same_incident_is_suppressed_within_the_cooldown(tmp_path):
@@ -28,9 +28,9 @@ def test_it_sends_again_once_the_cooldown_expires(tmp_path):
 
 def test_distinct_incidents_do_not_suppress_each_other(tmp_path):
     st = State.load(tmp_path / "s.json")
-    st.should_send("allocation:dorian:6", T0, 3600)
+    st.should_send("allocation:duser:6", T0, 3600)
 
-    assert st.should_send("allocation:dorian:7", T0, 3600) is True
+    assert st.should_send("allocation:duser:7", T0, 3600) is True
 
 
 def test_state_survives_a_restart(tmp_path):

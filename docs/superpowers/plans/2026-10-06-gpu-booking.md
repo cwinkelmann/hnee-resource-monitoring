@@ -149,7 +149,7 @@ Use one connection per `ClaimsStore`, created with `check_same_thread=False` and
 from datetime import datetime, timedelta, timezone
 
 T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
-USERS = ("cwinkelmann", "dorian.zwanzig", "andre.kliem")
+USERS = ("cwinkelmann", "duser", "auser")
 
 
 class FakeUsers:
@@ -163,7 +163,7 @@ class FakeUsers:
         return sorted(self._names)
 
 
-def book(store, user="dorian.zwanzig", gpu=4, gib=40, start=T0, hours=4, now=T0, ip="10.0.0.1",
+def book(store, user="duser", gpu=4, gib=40, start=T0, hours=4, now=T0, ip="10.0.0.1",
          note=None, card_mib=81559):
     return store.create(user=user, gpu=gpu, vram_mib=gib * 1024, start=start,
                         end=start + timedelta(hours=hours), note=note, ip=ip, now=now,
@@ -198,14 +198,14 @@ def _err(fn):
 
 def test_create_returns_the_stored_booking(store):
     b = book(store, note="KEV eval")
-    assert (b.user, b.gpu, b.vram_mib, b.note, b.created_ip) == ("dorian.zwanzig", 4, 40960, "KEV eval", "10.0.0.1")
+    assert (b.user, b.gpu, b.vram_mib, b.note, b.created_ip) == ("duser", 4, 40960, "KEV eval", "10.0.0.1")
     assert b.start == T0 and b.end == T0 + timedelta(hours=4) and b.cancelled_at is None
     assert store.get(b.id) == b
 
 
 @pytest.mark.parametrize("kwargs, status, detail", [
     ({"user": "Bad Name"}, 400, "invalid user name"),
-    ({"user": "dorain.zwanzig"}, 400, "unknown user 'dorain.zwanzig'"),
+    ({"user": "dusr"}, 400, "unknown user 'dusr'"),
     ({"gpu": 8}, 400, "GPU must be 0–7"),
     ({"gib": 0}, 400, "VRAM must be between 1 and 79 GiB"),
     ({"gib": 80}, 400, "VRAM must be between 1 and 79 GiB"),
@@ -233,14 +233,14 @@ def test_blank_note_is_stored_as_null(store):
 
 def test_overbooking_is_409_with_the_free_amount(store):
     book(store, user="cwinkelmann", gib=40)
-    status, detail = _err(lambda: book(store, user="andre.kliem", gib=40))
+    status, detail = _err(lambda: book(store, user="auser", gib=40))
     assert status == 409
     assert detail.startswith("GPU 4 has only 39.6 GiB unbooked between Tue 06 Oct 12:00 UTC and Tue 06 Oct 16:00 UTC")
 
 
 def test_two_shares_that_fit_both_succeed(store):
     book(store, user="cwinkelmann", gib=40)
-    assert book(store, user="andre.kliem", gib=39).vram_mib == 39 * 1024
+    assert book(store, user="auser", gib=39).vram_mib == 39 * 1024
 
 
 def test_back_to_back_full_card_bookings_do_not_conflict(store):
@@ -251,14 +251,14 @@ def test_back_to_back_full_card_bookings_do_not_conflict(store):
 def test_capacity_is_checked_at_the_worst_instant(store):
     # A: 30 GiB 12-14, B: 30 GiB 13-16. New 30 GiB 12-16 collides only during 13-14 (90 > 79.6).
     book(store, user="cwinkelmann", gib=30, hours=2)
-    book(store, user="andre.kliem", gib=30, start=T0 + timedelta(hours=1), hours=3)
+    book(store, user="auser", gib=30, start=T0 + timedelta(hours=1), hours=3)
     status, detail = _err(lambda: book(store, gib=30, hours=4))
     assert status == 409 and "between Tue 06 Oct 13:00 UTC and Tue 06 Oct 14:00 UTC" in detail
 
 
 def test_other_gpus_and_cancelled_bookings_do_not_count(store):
     other = book(store, user="cwinkelmann", gpu=5, gib=79)
-    gone = book(store, user="andre.kliem", gib=79)
+    gone = book(store, user="auser", gib=79)
     store.cancel(gone.id, ip="10.0.0.2", now=T0)
     assert book(store, gib=79).gpu == 4 and other.gpu == 5
 
@@ -307,7 +307,7 @@ def test_parallel_bookings_for_the_last_share_exactly_one_wins(tmp_path):
         finally:
             s.close()
 
-    ts = [threading.Thread(target=attempt, args=(u,)) for u in ("cwinkelmann", "andre.kliem")]
+    ts = [threading.Thread(target=attempt, args=(u,)) for u in ("cwinkelmann", "auser")]
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert sorted(results, key=str) == [409, "ok"]
@@ -410,70 +410,70 @@ def _p(user, mib, pid=1, gpu=4):
 
 
 def test_unbooked_gpu_is_free_for_anyone():
-    assert check_bookings(_snap([_p("andre.kliem", 70 * GIB)]), POL, []) == []
+    assert check_bookings(_snap([_p("auser", 70 * GIB)]), POL, []) == []
 
 
 def test_within_own_share_is_fine_and_110_percent_is_still_fine():
-    b = [_b("dorian.zwanzig", gib=40)]
-    assert check_bookings(_snap([_p("dorian.zwanzig", 44 * GIB)]), POL, b) == []   # exactly 110 %
+    b = [_b("duser", gib=40)]
+    assert check_bookings(_snap([_p("duser", 44 * GIB)]), POL, b) == []   # exactly 110 %
 
 
 def test_over_own_share_beyond_tolerance_alerts():
-    b = [_b("dorian.zwanzig", gib=40)]
-    (a,) = check_bookings(_snap([_p("dorian.zwanzig", 44 * GIB + 1)]), POL, b)
-    assert (a.kind, a.key, a.user, a.gpu_index) == ("over_booking", "booking:over:dorian.zwanzig:4", "dorian.zwanzig", 4)
+    b = [_b("duser", gib=40)]
+    (a,) = check_bookings(_snap([_p("duser", 44 * GIB + 1)]), POL, b)
+    assert (a.kind, a.key, a.user, a.gpu_index) == ("over_booking", "booking:over:duser:4", "duser", 4)
     assert "booked 40.0 GiB" in a.text
 
 
 def test_non_booker_within_the_unbooked_remainder_is_fine():
-    b = [_b("dorian.zwanzig", gib=40)]
-    procs = [_p("dorian.zwanzig", 30 * GIB), _p("andre.kliem", 39 * GIB, pid=2)]
+    b = [_b("duser", gib=40)]
+    procs = [_p("duser", 30 * GIB), _p("auser", 39 * GIB, pid=2)]
     assert check_bookings(_snap(procs), POL, b) == []
 
 
 def test_non_bookers_together_beyond_the_remainder_all_alert():
-    b = [_b("dorian.zwanzig", gib=60)]
-    procs = [_p("andre.kliem", 12 * GIB, pid=2), _p("cwinkelmann", 10 * GIB, pid=3)]
+    b = [_b("duser", gib=60)]
+    procs = [_p("auser", 12 * GIB, pid=2), _p("cwinkelmann", 10 * GIB, pid=3)]
     alerts = check_bookings(_snap(procs), POL, b)
-    assert {(a.kind, a.user) for a in alerts} == {("booked_gpu", "andre.kliem"), ("booked_gpu", "cwinkelmann")}
-    assert all("booked by dorian.zwanzig" in a.text and "unbooked" in a.text for a in alerts)
+    assert {(a.kind, a.user) for a in alerts} == {("booked_gpu", "auser"), ("booked_gpu", "cwinkelmann")}
+    assert all("booked by duser" in a.text and "unbooked" in a.text for a in alerts)
 
 
 def test_a_user_with_two_processes_is_one_incident_with_summed_vram():
-    b = [_b("dorian.zwanzig", gib=40)]
-    procs = [_p("dorian.zwanzig", 30 * GIB), _p("dorian.zwanzig", 20 * GIB, pid=2)]
+    b = [_b("duser", gib=40)]
+    procs = [_p("duser", 30 * GIB), _p("duser", 20 * GIB, pid=2)]
     (a,) = check_bookings(_snap(procs), POL, b)
     assert a.kind == "over_booking" and "50.0 GiB" in a.text
 
 
 def test_two_bookings_by_one_user_add_up():
-    b = [_b("dorian.zwanzig", gib=20, id=1), _b("dorian.zwanzig", gib=20, id=2)]
-    assert check_bookings(_snap([_p("dorian.zwanzig", 40 * GIB)]), POL, b) == []
+    b = [_b("duser", gib=20, id=1), _b("duser", gib=20, id=2)]
+    assert check_bookings(_snap([_p("duser", 40 * GIB)]), POL, b) == []
 
 
 def test_expired_and_cancelled_bookings_are_ignored():
-    expired = _b("dorian.zwanzig", gib=79, start=T0 - timedelta(hours=5), hours=5)   # ends exactly at T0
+    expired = _b("duser", gib=79, start=T0 - timedelta(hours=5), hours=5)   # ends exactly at T0
     cancelled = _b("cwinkelmann", gib=79, cancelled=True, id=2)
-    assert check_bookings(_snap([_p("andre.kliem", 70 * GIB)]), POL, [expired, cancelled]) == []
+    assert check_bookings(_snap([_p("auser", 70 * GIB)]), POL, [expired, cancelled]) == []
 
 
 def test_alert_stops_at_the_first_poll_after_the_booking_ends():
-    b = [_b("dorian.zwanzig", gib=79, start=T0 - timedelta(hours=1), hours=2)]
-    busy = [_p("andre.kliem", 30 * GIB)]
+    b = [_b("duser", gib=79, start=T0 - timedelta(hours=1), hours=2)]
+    busy = [_p("auser", 30 * GIB)]
     assert check_bookings(_snap(busy, t=T0), POL, b)                                 # booked: alert
     assert check_bookings(_snap(busy, t=T0 + timedelta(hours=1)), POL, b) == []      # ended: free
 
 
 def test_unattributed_processes_never_trigger_booking_alerts():
-    b = [_b("dorian.zwanzig", gib=79)]
+    b = [_b("duser", gib=79)]
     assert check_bookings(_snap([GpuProcess(9, 4, 30 * GIB, None)]), POL, b) == []
 
 
 def test_unattributed_rule_fires_on_booked_gpus_only():
     procs = [GpuProcess(9, 4, 2 * GIB, None)]
     assert check_unattributed(_snap(procs), POL, []) == []
-    (a,) = check_unattributed(_snap(procs), POL, [_b("dorian.zwanzig")])
-    assert a.kind == "unattributed" and "booked by dorian.zwanzig" in a.text
+    (a,) = check_unattributed(_snap(procs), POL, [_b("duser")])
+    assert a.kind == "unattributed" and "booked by duser" in a.text
 ```
 
   In `tests/test_rules_stateless.py`, delete the `check_allocation` tests and keep the capacity tests. In `tests/test_policy.py`, add:
@@ -508,12 +508,12 @@ def test_assignments_section_is_optional(tmp_path):
 
 ```python
 def test_run_once_alerts_on_someone_elses_booking(tmp_path, monkeypatch):
-    # fake probe: andre.kliem holds 70 GiB on GPU 4; a booking by dorian.zwanzig for 60 GiB is active
+    # fake probe: auser holds 70 GiB on GPU 4; a booking by duser for 60 GiB is active
     ...
     from resourcemonitor.claims import ClaimsStore
     from tests.claims_fixture import FakeUsers
     s = ClaimsStore(tmp_path / "c.sqlite", users=FakeUsers())
-    s.create(user="dorian.zwanzig", gpu=4, vram_mib=60 * 1024, start=t0, end=t0 + timedelta(hours=4),
+    s.create(user="duser", gpu=4, vram_mib=60 * 1024, start=t0, end=t0 + timedelta(hours=4),
              note=None, ip="10.0.0.1", now=t0)
     s.close()
     run_once(pol, state, notifier, tracker, ledger, "carrot", tmp_path / "e.json",
@@ -611,7 +611,7 @@ Writes are **not** gated by `_QUERY_SLOTS`. Every response goes through `_send`,
 
 ```python
 def test_create_then_cancel_round_trip(live):
-    s, _, body = _post(live + "/api/claims", {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 40,
+    s, _, body = _post(live + "/api/claims", {"user": "duser", "gpu": 4, "vram_gib": 40,
                        "start": "2026-10-06T14:00:00+02:00", "end": "2026-10-06T18:00:00+02:00",
                        "note": "KEV eval"})
     c = json.loads(body)["claim"]
@@ -623,10 +623,10 @@ def test_create_then_cancel_round_trip(live):
 
 
 @pytest.mark.parametrize("payload, status, detail", [
-    ({"user": "dorain", "gpu": 4, "vram_gib": 1, "start": S, "end": E}, 400, "unknown user 'dorain'"),
-    ({"user": "dorian.zwanzig", "gpu": "4", "vram_gib": 1, "start": S, "end": E}, 400, "missing or invalid field 'gpu'"),
-    ({"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 1, "start": "2026-10-06T14:00", "end": E}, 400, "times need a date, time and UTC offset"),
-    ({"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 1, "start": S, "end": E, "x": 1}, 400, "unknown field"),
+    ({"user": "dusr", "gpu": 4, "vram_gib": 1, "start": S, "end": E}, 400, "unknown user 'dusr'"),
+    ({"user": "duser", "gpu": "4", "vram_gib": 1, "start": S, "end": E}, 400, "missing or invalid field 'gpu'"),
+    ({"user": "duser", "gpu": 4, "vram_gib": 1, "start": "2026-10-06T14:00", "end": E}, 400, "times need a date, time and UTC offset"),
+    ({"user": "duser", "gpu": 4, "vram_gib": 1, "start": S, "end": E, "x": 1}, 400, "unknown field"),
 ])
 def test_bad_bookings_get_a_specific_400(live, payload, status, detail):
     s, _, body = _post(live + "/api/claims", payload)
@@ -675,7 +675,7 @@ def test_history_stays_unwritable_and_serve_imports_nothing_forbidden(): ...  # 
     - an inline error area (`id="book-error"`) that shows the server's `detail` verbatim through `textContent`.
   - Times are sent as ISO with the browser's offset: build `YYYY-MM-DDTHH:MM:00±HH:MM` from `getTimezoneOffset()`.
   - **Calendar** (`id="booking-calendar"`): one SVG with rows for GPUs 0–7, from now to +14 days, with day ticks. Each uncancelled claim is a bar whose height is proportional to `vram_mib / card total`. Bars are stacked within the row by greedy lanes ordered by start, in the user's colour, labelled `user · NN GiB` when wide enough. Clicking a bar shows its details panel (`id="booking-detail"`) with a Cancel button. The two-step confirmation is "Cancel booking?" → "Yes, cancel" / "Keep", and it POSTs the cancel.
-  - **Recent changes** (`id="booking-changes"`): the last 20 events from `/api/claims`. Each claim yields a "booked" event at `created_at` and, if cancelled, a "cancelled" event at `cancelled_at`. Sort newest first. Format: `HH:MM · booked GPU 4, 40 GiB, for dorian.zwanzig until Fri 18:00 · from 10.188.3.7`.
+  - **Recent changes** (`id="booking-changes"`): the last 20 events from `/api/claims`. Each claim yields a "booked" event at `created_at` and, if cancelled, a "cancelled" event at `cancelled_at`. Sort newest first. Format: `HH:MM · booked GPU 4, 40 GiB, for duser until Fri 18:00 · from 10.188.3.7`.
   - Refresh `/api/claims` every 60 s and immediately after a successful create or cancel. Never add query params beyond `days`.
 - **Now cards:**
   - Replace "assigned to X" with the active bookings (`user NN GiB until Fri 18:00`, up to 2 lines, then "+n more") and "NN GiB free".
@@ -715,7 +715,7 @@ console.log("ok");
 - [ ] **Step 4: Run** `python3 -m pytest -q`.
 - [ ] **Step 5: Local visual check.**
   - Build the preview history: `build_history` over 72 h, ending now.
-  - Seed 3 bookings into a temp claims DB through `ClaimsStore` with `FakeUsers`: dorian GPU 6 40 GiB from now to +2 d; andre GPU 0 79 GiB +1 d → +3 d; cwinkelmann GPU 4 30 GiB from now to +6 h.
+  - Seed 3 bookings into a temp claims DB through `ClaimsStore` with `FakeUsers`: duser GPU 6 40 GiB from now to +2 d; auser GPU 0 79 GiB +1 d → +3 d; cwinkelmann GPU 4 30 GiB from now to +6 h.
   - Serve with `--claims` pointing at it on a free port, with `--stale-after 100000`.
   - Note: `serve` uses `PwdUsers` for `/api/users`. On the Mac this lists Mac accounts, which is fine for the visual check, and booking through the form works for a Mac account.
   - With Playwright: book through the form, see the booking in the calendar and the recent changes, cancel it through the two-step flow, and check there are no console errors.
@@ -750,7 +750,7 @@ def test_docs_describe_booking_honestly():
   1. `rsync -a --exclude .git --exclude .superpowers --exclude __pycache__ --exclude .idea --exclude .pytest_cache --exclude .claude/settings.local.json --exclude .playwright-mcp ./ cwinkelmann@10.188.1.1:~/ResourceMonitor/`
   2. `systemctl --user restart resourcemonitor-soak resourcemonitor-web; sleep 75; systemctl --user is-active resourcemonitor-soak resourcemonitor-web`
   3. **End to end from this Mac** with python urllib:
-     - `GET http://10.188.1.1:8765/api/users` must list `cwinkelmann`, `dorian.zwanzig` and `andre.kliem`.
+     - `GET http://10.188.1.1:8765/api/users` must list `cwinkelmann`, `duser` and `auser`.
      - `POST /api/claims` with `{"user": "cwinkelmann", "gpu": 5, "vram_gib": 1, "start": <now+2 min with offset>, "end": <now+30 min>, "note": "deploy self-test, will be cancelled"}`, with `Origin: http://10.188.1.1:8765`, expecting 201.
      - Wait until the start time plus 90 s.
      - `GET /api/now` must show the booking on GPU 5.

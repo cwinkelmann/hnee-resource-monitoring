@@ -19,7 +19,7 @@ Energy is also tracked (see Energy below). Unknown owners are reported as unknow
 |---|---|
 | Services run in the `resourcemonitor` conda env (user's choice) | stdlib only; `deploy/run-resourcemonitor.sh` takes that env when it exists and falls back to `python3`, so a host without conda (the t14) still runs. Recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest` |
 | `systemd --user` works, `Linger=yes` | runs as a user service, no root |
-| Docker is rootless; `dorian.zwanzig` is UID 1053, outside `cwinkelmann`'s subuid range | **cannot run in a rootless container**: inside, `/proc/<pid>` shows `uid=65534 nobody` for other users, so attribution is destroyed |
+| Docker is rootless; `duser` is UID 1053, outside `cwinkelmann`'s subuid range | **cannot run in a rootless container**: inside, `/proc/<pid>` shows `uid=65534 nobody` for other users, so attribution is destroyed |
 | `nvidia-smi` reports PIDs only | owner comes from `/proc` |
 | `total_energy_consumption` is not supported | energy is integrated from `power.draw` |
 | Idle H100 draws about 66 W; box drew 1,532 W with 2 of 8 busy | idle cost is real, hence the report |

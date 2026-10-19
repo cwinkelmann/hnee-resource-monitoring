@@ -15,7 +15,7 @@ from tests.history_fixture import build_history
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
 NOW = T0 + timedelta(hours=48)
 POLICY = """[assignments]
-"dorian.zwanzig" = [0, 1, 2, 3]
+"duser" = [0, 1, 2, 3]
 "cwinkelmann" = [4, 5, 6, 7]
 [rules]
 idle_util_pct = 5
@@ -178,7 +178,7 @@ def test_api_vram_returns_stacked_vram_per_gpu(live):
     assert set(d["gpus"]) == {str(i) for i in range(8)}
     g7 = d["gpus"]["7"]
     assert g7["total_mib"] == 81559 and 0 < len(g7["points"]) <= 300
-    assert g7["points"][-1]["by_user"] == {"dorian.zwanzig": 22715 + 512}
+    assert g7["points"][-1]["by_user"] == {"duser": 22715 + 512}
     assert d["gpus"]["4"]["points"][-1]["by_user"] == {"(unattributed)": 2048}
     _assert_headers(headers)
     status, _, body = _get(live + "/api/vram?hours=1")
@@ -340,13 +340,13 @@ def test_api_claims_back_reaches_further_into_the_past_than_the_default_week(tmp
     try:
         then = NOW - timedelta(days=20)
         store = ClaimsStore(tmp_path / "claims.sqlite", users=FakeUsers())
-        book(store, user="andre.kliem", gpu=2, gib=30, start=then, hours=6, now=then)
+        book(store, user="auser", gpu=2, gib=30, start=then, hours=6, now=then)
         store.close()
         users = lambda q: [c["user"] for c in json.loads(_get(base + "/api/claims" + q)[2])["claims"]]
         assert users("") == ["cwinkelmann"]                      # default: 7 days back
         assert users("?days=1") == ["cwinkelmann"]
-        assert users("?back=30") == ["andre.kliem", "cwinkelmann"]
-        assert users("?days=1&back=30") == ["andre.kliem", "cwinkelmann"]
+        assert users("?back=30") == ["auser", "cwinkelmann"]
+        assert users("?days=1&back=30") == ["auser", "cwinkelmann"]
         assert users("?back=19") == ["cwinkelmann"]
         status, headers, _ = _get(base + "/api/claims?days=1&back=30")
         assert status == 200

@@ -11,7 +11,7 @@ T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 
 def _snap(t):
     return Snapshot(t, (GpuState(6, 81559, 22715, 100, 575.0),),
-                    (GpuProcess(42, 6, 22706, "dorian.zwanzig", "python kev_run.py"),
+                    (GpuProcess(42, 6, 22706, "duser", "python kev_run.py"),
                      GpuProcess(43, 6, 9, None, None)))
 
 
@@ -22,17 +22,17 @@ def _rows(db, sql):
 def test_record_writes_one_transaction_across_all_tables(tmp_path):
     db = tmp_path / "h.sqlite"
     w = HistoryWriter(db)
-    a = Alert(kind="allocation", key="allocation:dorian.zwanzig:6", text="x", gpu_index=6,
-              user="dorian.zwanzig")
-    w.record(_snap(T0), 60.0, [EnergyRow(6, "dorian.zwanzig", 0.0096, 60.0)], [a], {a.key})
+    a = Alert(kind="allocation", key="allocation:duser:6", text="x", gpu_index=6,
+              user="duser")
+    w.record(_snap(T0), 60.0, [EnergyRow(6, "duser", 0.0096, 60.0)], [a], {a.key})
     w.close()
 
     assert _rows(db, "SELECT ts, dt_s FROM polls") == [(T0.isoformat(), 60.0)]
     assert _rows(db, "SELECT gpu, used_mib, util_pct, power_w FROM gpu_samples") == [(6, 22715, 100, 575.0)]
     assert sorted(_rows(db, "SELECT pid, user, name FROM proc_samples"), key=lambda r: r[0]) == \
-        [(42, "dorian.zwanzig", "python kev_run.py"), (43, None, None)]
-    assert _rows(db, "SELECT bucket, kwh, seconds FROM energy_samples") == [("dorian.zwanzig", 0.0096, 60.0)]
-    assert _rows(db, "SELECT kind, gpu, user, sent FROM alerts") == [("allocation", 6, "dorian.zwanzig", 1)]
+        [(42, "duser", "python kev_run.py"), (43, None, None)]
+    assert _rows(db, "SELECT bucket, kwh, seconds FROM energy_samples") == [("duser", 0.0096, 60.0)]
+    assert _rows(db, "SELECT kind, gpu, user, sent FROM alerts") == [("allocation", 6, "duser", 1)]
 
 
 def test_first_poll_records_null_interval(tmp_path):
@@ -73,7 +73,7 @@ def test_fixture_builds_a_deterministic_history(tmp_path):
     (n,) = _rows(db, "SELECT COUNT(*) FROM polls")[0]
     assert n == 24 * 12                                   # 5-minute polls
     buckets = {b for (b,) in _rows(db, "SELECT DISTINCT bucket FROM energy_samples")}
-    assert buckets == {"dorian.zwanzig", "cwinkelmann", "(idle)", "(unattributed)"}
+    assert buckets == {"duser", "cwinkelmann", "(idle)", "(unattributed)"}
 
 
 def test_fixture_has_eight_runs_on_gpu6_and_honours_the_gap(tmp_path):

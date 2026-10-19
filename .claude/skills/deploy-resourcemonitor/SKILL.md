@@ -13,7 +13,7 @@ description: Use when installing, updating or restarting the GPU ResourceMonitor
 | hostname | **`carrot` does not resolve in DNS** (`SERVFAIL`) — use the IP, always |
 | auth | key-based; `ssh -o BatchMode=yes` works with no prompt |
 | python | `~/miniconda3/envs/resourcemonitor/bin/python` (3.12). Units run in that conda env by the user's choice; code stays stdlib-only. **If the env is removed or renamed, the monitor stops** — recreate with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`. |
-| hardware | 8 × H100 80GB HBM3, driver 580.178.04, shared with `dorian.zwanzig` |
+| hardware | 8 × H100 80GB HBM3, driver 580.178.04, shared with `duser` |
 
 Quick liveness check before anything else:
 

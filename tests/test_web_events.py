@@ -119,7 +119,7 @@ def test_the_watcher_is_woken_when_an_important_booking_takes_the_card(live):
         time.sleep(0.02)
     assert srv.watchers.attached(victim["id"]) is True
     status, body = _post(base + "/api/claims",
-                         {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 79,
+                         {"user": "duser", "gpu": 4, "vram_gib": 79,
                           "start": T0.isoformat(),
                           "end": (T0 + timedelta(hours=1)).isoformat(),
                           "priority": "important"})
@@ -131,7 +131,7 @@ def test_the_watcher_is_woken_when_an_important_booking_takes_the_card(live):
     # 79 GiB taken from a 79 GiB booking leaves a 663 MiB crumb, below anything bookable.
     assert got[0][1]["effective_mib"] < 1024
     assert got[0][1]["truncated"] is True
-    assert got[0][1]["by"] == ["dorian.zwanzig"]
+    assert got[0][1]["by"] == ["duser"]
 
 
 def test_past_max_watchers_the_route_answers_503(live, monkeypatch):
@@ -199,7 +199,7 @@ def test_a_watched_victim_is_taken_at_once_over_http(live):
             break
         time.sleep(0.02)
     status, body = _post(base + "/api/claims",
-                         {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 79,
+                         {"user": "duser", "gpu": 4, "vram_gib": 79,
                           "duration_minutes": 60, "priority": "important"})
     assert status == 201
     assert body["claim"]["start"] == T0.isoformat()      # now, not now + 30 minutes

@@ -10,7 +10,7 @@ def _write(tmp_path, body):
 
 GOOD = """
 [assignments]
-"dorian.zwanzig" = [0, 1]
+"duser" = [0, 1]
 "cwinkelmann" = [2, 3]
 [rules]
 idle_util_pct = 5
@@ -26,7 +26,7 @@ channel = "#gpu-watch"
 def test_loads_assignments_as_sets_of_int(tmp_path):
     pol = load_policy(_write(tmp_path, GOOD))
 
-    assert pol.assignments["dorian.zwanzig"] == frozenset({0, 1})
+    assert pol.assignments["duser"] == frozenset({0, 1})
     assert pol.capacity_free_mib == 40960
     assert pol.cooldown_s == 3600
 

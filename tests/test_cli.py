@@ -257,10 +257,10 @@ def test_run_once_alerts_on_someone_elses_booking(tmp_path, monkeypatch):
     pol, state, rec, tracker, ledger, epath = _history_setup(monkeypatch, tmp_path)
     t0 = datetime.now(timezone.utc)
     snap = Snapshot(t0, (GpuState(4, 81559, 70 * 1024, 100, 500.0),),
-                    (GpuProcess(1, 4, 70 * 1024, "andre.kliem"),))
+                    (GpuProcess(1, 4, 70 * 1024, "auser"),))
     monkeypatch.setattr(cli, "probe", lambda: dataclasses.replace(snap, taken_at=t0))
     s = ClaimsStore(tmp_path / "c.sqlite", users=FakeUsers())
-    s.create(user="dorian.zwanzig", gpu=4, vram_mib=60 * 1024, start=t0 - timedelta(minutes=1),
+    s.create(user="duser", gpu=4, vram_mib=60 * 1024, start=t0 - timedelta(minutes=1),
              end=t0 + timedelta(hours=4), note=None, ip="10.0.0.1", now=t0)
     s.close()
     cli.run_once(pol, state, rec, tracker, ledger, "carrot", epath,

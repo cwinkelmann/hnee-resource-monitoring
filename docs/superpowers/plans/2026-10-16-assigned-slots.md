@@ -387,7 +387,7 @@ def _write_v3(path):
     conn = sqlite3.connect(str(path))
     conn.executescript(_V3_SCHEMA)
     conn.execute("INSERT INTO claims (user, gpu, vram_mib, start, end, created_at, "
-                 "created_ip, priority) VALUES ('dorian.zwanzig', 4, 40960, "
+                 "created_ip, priority) VALUES ('duser', 4, 40960, "
                  "'2026-10-06T12:00:00+00:00', '2026-10-06T16:00:00+00:00', "
                  "'2026-10-06T11:00:00+00:00', '10.0.0.1', 'lendable')")
     conn.commit()
@@ -405,7 +405,7 @@ def test_a_v3_file_migrates_and_keeps_every_row(tmp_path):
     try:
         got = store.get(1)
         assert got is not None
-        assert got.user == "dorian.zwanzig" and got.priority == "lendable"
+        assert got.user == "duser" and got.priority == "lendable"
         assert got.auto_advance is False
         assert got.group_id is None
         assert got.notice_seconds is None
@@ -1598,7 +1598,7 @@ def test_an_unknown_field_is_still_rejected(live):
 
 ```python
 def _booking(**over):
-    d = {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 40, "start": S, "end": E}
+    d = {"user": "duser", "gpu": 4, "vram_gib": 40, "start": S, "end": E}
     d.update(over)
     return {k: v for k, v in d.items() if v is not None}
 ```
@@ -1970,7 +1970,7 @@ def test_a_started_booking_does_not_count_against_the_limit(store):
 def test_the_limit_is_per_user(store):
     _assign(store, max_pending=1, vram_mib=79 * 1024)
     _assign(store, max_pending=1, vram_mib=79 * 1024)
-    _assign(store, user="dorian.zwanzig", max_pending=1, vram_mib=79 * 1024)
+    _assign(store, user="duser", max_pending=1, vram_mib=79 * 1024)
 
 
 def test_a_group_counts_as_one_row_per_card(store):
@@ -2407,7 +2407,7 @@ def _lendable(store, *, notice=None, gib=79, hours=4, now=T0):
 
 
 def _important(store, *, now, watching=lambda _id: False, gib=79, hours=2):
-    return store.create(user="dorian.zwanzig", gpu=4, vram_mib=gib * 1024, start=now,
+    return store.create(user="duser", gpu=4, vram_mib=gib * 1024, start=now,
                         end=now + timedelta(hours=hours), note=None, ip="10.0.0.2",
                         now=now, priority="important", grace=GRACE, watching=watching,
                         cards=CARDS)
@@ -2455,7 +2455,7 @@ def test_a_declared_notice_may_only_shorten_never_lengthen(store):
 
 def test_the_longest_notice_among_several_victims_wins(store):
     quick = _lendable(store, gib=40, notice=0)
-    slow = store.create(user="andre.kliem", gpu=4, vram_mib=39 * 1024, start=T0,
+    slow = store.create(user="auser", gpu=4, vram_mib=39 * 1024, start=T0,
                         end=T0 + timedelta(hours=4), note=None, ip="10.0.0.3", now=T0,
                         priority="lendable", notice_seconds=300, cards=CARDS).booking
     now = T0 + timedelta(minutes=5)
@@ -2475,7 +2475,7 @@ def test_a_future_victim_is_not_running_so_there_is_no_notice_at_all(store):
 
 def test_grace_zero_in_policy_still_means_instant(store):
     victim = _lendable(store, notice=None)
-    made = store.create(user="dorian.zwanzig", gpu=4, vram_mib=79 * 1024,
+    made = store.create(user="duser", gpu=4, vram_mib=79 * 1024,
                         start=T0 + timedelta(minutes=5),
                         end=T0 + timedelta(hours=2), note=None, ip="10.0.0.2",
                         now=T0 + timedelta(minutes=5), priority="important",
@@ -2585,7 +2585,7 @@ def test_a_starved_victim_is_truncated_at_the_instant_it_loses_the_card(store):
     assert [r["id"] for r in made.revoked] == [victim.id]
     assert made.revoked[0]["truncated"] is True
     assert made.revoked[0]["effective_mib"] == 0
-    assert made.revoked[0]["by"] == ["dorian.zwanzig"]
+    assert made.revoked[0]["by"] == ["duser"]
 
 
 def test_a_victim_shrunk_but_not_starved_is_reported_and_left_alone(store):
@@ -2617,7 +2617,7 @@ def test_an_important_booking_never_revokes_another_important_one(store):
 
 def test_a_lendable_booking_revokes_nothing(store):
     victim = _lendable(store, notice=0, gib=40, hours=4)
-    made = store.create(user="dorian.zwanzig", gpu=4, vram_mib=39 * 1024, start=T0,
+    made = store.create(user="duser", gpu=4, vram_mib=39 * 1024, start=T0,
                         end=T0 + H, note=None, ip="10.0.0.2", now=T0,
                         priority="lendable", cards=CARDS)
     assert made.revoked == []
@@ -2628,7 +2628,7 @@ def test_revoking_twice_at_the_same_instant_truncates_once(store):
     victim = _lendable(store, notice=0, gib=79, hours=4)
     now = T0 + timedelta(minutes=5)
     _important(store, now=now, gib=79, watching=lambda i: i == victim.id, hours=1)
-    second = store.create(user="andre.kliem", gpu=4, vram_mib=79 * 1024, start=now + H,
+    second = store.create(user="auser", gpu=4, vram_mib=79 * 1024, start=now + H,
                           end=now + timedelta(hours=2), note=None, ip="10.0.0.3", now=now,
                           priority="important", watching=lambda i: i == victim.id,
                           cards=CARDS)
@@ -2648,7 +2648,7 @@ def test_truncation_never_leaves_an_end_before_the_start(store):
 
 def test_the_freed_tail_advances_someone_else(store):
     victim = _lendable(store, notice=0, gib=79, hours=4)
-    waiting = store.create(user="andre.kliem", gpu=4, vram_mib=79 * 1024, start=None,
+    waiting = store.create(user="auser", gpu=4, vram_mib=79 * 1024, start=None,
                            end=None, duration=H, note=None, ip="10.0.0.3", now=T0,
                            auto_advance=True, cards=CARDS).booking
     assert waiting.start == T0 + timedelta(hours=4)
@@ -2752,7 +2752,7 @@ _Server.watchers: Watchers
 ```
 ```
 GET /api/claims/{id}/events
-  200 {"event":"taken","effective_mib":0,"lost_mib":80896,"by":["dorian.zwanzig"],
+  200 {"event":"taken","effective_mib":0,"lost_mib":80896,"by":["duser"],
        "deadline":"…","truncated":true}
   204 (held EVENT_HOLD_S, nothing happened — reconnect)
   404 unknown booking · 409 cancelled or already over · 503 past max_watchers
@@ -2884,7 +2884,7 @@ def test_the_watcher_is_woken_when_an_important_booking_takes_the_card(live):
         time.sleep(0.02)
     assert srv.watchers.attached(victim["id"]) is True
     status, body = _post(base + "/api/claims",
-                         {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 79,
+                         {"user": "duser", "gpu": 4, "vram_gib": 79,
                           "start": T0.isoformat(),
                           "end": (T0 + timedelta(hours=1)).isoformat(),
                           "priority": "important"})
@@ -2894,7 +2894,7 @@ def test_the_watcher_is_woken_when_an_important_booking_takes_the_card(live):
     assert got[0][0] == 200
     assert got[0][1]["event"] == "taken"
     assert got[0][1]["effective_mib"] == 0
-    assert got[0][1]["by"] == ["dorian.zwanzig"]
+    assert got[0][1]["by"] == ["duser"]
 
 
 def test_past_max_watchers_the_route_answers_503(live, monkeypatch):

@@ -29,11 +29,11 @@ def test_one_hour_at_700w_is_0_7_kwh():
 def test_energy_follows_the_user_holding_the_card():
     led = EnergyLedger(max_gap_s=7200)
     g = [GpuState(6, 81559, 22715, 100, 600.0)]
-    p = [GpuProcess(1, 6, 22715, "dorian.zwanzig")]
+    p = [GpuProcess(1, 6, 22715, "duser")]
     led.accumulate(_snap(T0, g, p))
     led.accumulate(_snap(T0 + timedelta(hours=1), g, p))
 
-    assert round(led.totals()["per_user"]["dorian.zwanzig"], 3) == 0.600
+    assert round(led.totals()["per_user"]["duser"], 3) == 0.600
 
 
 def test_two_users_on_one_card_split_by_memory_share():

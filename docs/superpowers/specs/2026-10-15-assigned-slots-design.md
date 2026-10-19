@@ -263,7 +263,7 @@ returns nothing at all until something happens to that booking, then writes one 
 and closes:
 
 ```json
-{"event": "taken", "effective_mib": 0, "by": ["dorian.zwanzig"],
+{"event": "taken", "effective_mib": 0, "by": ["duser"],
  "deadline": "2026-10-16T14:03:00+02:00"}
 ```
 

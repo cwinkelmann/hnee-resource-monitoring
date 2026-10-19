@@ -4,15 +4,15 @@ import pytest
 from resourcemonitor.notify import Notifier, build_payload
 from resourcemonitor.rules import Alert
 
-A = Alert(kind="booked_gpu", key="booking:other:dorian.zwanzig:6", gpu_index=6,
-          user="dorian.zwanzig",
-          text="dorian.zwanzig is using GPU 6 (22.2 GiB), which is assigned to cwinkelmann.")
+A = Alert(kind="booked_gpu", key="booking:other:duser:6", gpu_index=6,
+          user="duser",
+          text="duser is using GPU 6 (22.2 GiB), which is assigned to cwinkelmann.")
 
 
 def test_payload_mentions_the_user_so_slack_notifies_them():
     body = json.dumps(build_payload([A], host="carrot"))
 
-    assert "dorian.zwanzig" in body
+    assert "duser" in body
     assert "carrot" in body
 
 

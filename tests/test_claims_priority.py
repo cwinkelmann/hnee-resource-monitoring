@@ -26,7 +26,7 @@ def store(tmp_path):
     s.close()
 
 
-def mk(store, user="dorian.zwanzig", gib=40, start=T0, hours=4, now=T0, priority="lendable",
+def mk(store, user="duser", gib=40, start=T0, hours=4, now=T0, priority="lendable",
        gpu=4, grace=timedelta(minutes=30)):
     return store.create(user=user, gpu=gpu, vram_mib=gib * GIB, start=start,
                         end=start + hours * H, note=None, ip="10.0.0.1", now=now,
@@ -75,7 +75,7 @@ def test_lendable_cannot_use_capacity_squeezed_by_important(store):
     mk(store, gib=60, start=T0 + 2 * H)
     mk(store, user="cwinkelmann", gib=60, priority="important", start=T0 + 2 * H)
     with pytest.raises(ClaimError):
-        mk(store, user="andre.kliem", gib=5, start=T0 + 2 * H)
+        mk(store, user="auser", gib=5, start=T0 + 2 * H)
 
 
 def test_important_ignores_lendable_and_reports_takes(store):
@@ -83,7 +83,7 @@ def test_important_ignores_lendable_and_reports_takes(store):
     c = mk(store, user="cwinkelmann", gib=40, priority="important", start=T0 + 3 * H, hours=2)
     assert c.adjusted_start is None
     assert [(t["id"], t["user"], t["vram_mib"], t["start"], t["end"]) for t in c.takes] == [
-        (a.id, "dorian.zwanzig", 20 * GIB, T0 + 3 * H, T0 + 5 * H)]
+        (a.id, "duser", 20 * GIB, T0 + 3 * H, T0 + 5 * H)]
 
 
 def test_important_must_fit_with_other_important(store):
@@ -95,7 +95,7 @@ def test_important_must_fit_with_other_important(store):
 
 
 def test_quick_hold_is_lendable_and_can_be_taken(store):
-    q = store.quick(user="dorian.zwanzig", gpu=4, ip="x", now=T0, card_mib=CARD)
+    q = store.quick(user="duser", gpu=4, ip="x", now=T0, card_mib=CARD)
     assert q.priority == "lendable"
     c = mk(store, user="cwinkelmann", gib=20, priority="important", start=T0)
     assert c.adjusted_start == T0 and c.booking.start == T0 + timedelta(minutes=30)
@@ -153,10 +153,10 @@ def test_cancelling_important_gives_capacity_back(store):
     mk(store, gib=80, start=T0 + H)
     imp = mk(store, user="cwinkelmann", gib=40, priority="important", start=T0 + H).booking
     with pytest.raises(ClaimError):
-        mk(store, user="andre.kliem", gib=1, start=T0 + H)
+        mk(store, user="auser", gib=1, start=T0 + H)
     store.cancel(imp.id, ip="x", now=T0)
     bookings = store.list_window(T0)
-    lend = next(b for b in bookings if b.user == "dorian.zwanzig")
+    lend = next(b for b in bookings if b.user == "duser")
     assert taken_segments(lend, bookings, CARD, T0, T0 + 10 * H) == []
 
 
@@ -210,7 +210,7 @@ def test_two_important_bookings_race_for_the_last_share(tmp_path):
         finally:
             s.close()
 
-    ts = [threading.Thread(target=go, args=(u,)) for u in ("cwinkelmann", "andre.kliem")]
+    ts = [threading.Thread(target=go, args=(u,)) for u in ("cwinkelmann", "auser")]
     for t in ts:
         t.start()
     for t in ts:
@@ -229,7 +229,7 @@ def _v2_file(path):
           cancelled_ip TEXT, kind TEXT NOT NULL DEFAULT 'calendar');
         PRAGMA user_version = 2;""")
     conn.execute("INSERT INTO claims (user, gpu, vram_mib, start, end, created_at, created_ip) "
-                 "VALUES ('dorian.zwanzig', 4, 40960, ?, ?, ?, '10.0.0.1')",
+                 "VALUES ('duser', 4, 40960, ?, ?, ?, '10.0.0.1')",
                  (T0.isoformat(), (T0 + H).isoformat(), T0.isoformat()))
     conn.commit()
     conn.close()

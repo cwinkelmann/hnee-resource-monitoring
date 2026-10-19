@@ -22,7 +22,7 @@
 | Reverse v1's "reserving GPUs is out of scope" | The tool now records reservations. It still never **enforces** them: no kill, no signal, no scheduling. |
 | Web form, honour system (rejected: ssh command, per-user tokens) | Anyone on the LAN can book or cancel in any name. The counterweight is a complete audit trail (time and client IP of every booking and cancellation) shown on the page. |
 | Unbooked capacity is free | No "unbooked use" nagging. Booking is how you protect capacity. |
-| Start clean at switch-over (rejected: seeding from the split) | No bookings exist at launch, so every GPU is free and today's "outside allocation" alerts (andre on 0–3, dorian on 6–7) disappear. |
+| Start clean at switch-over (rejected: seeding from the split) | No bookings exist at launch, so every GPU is free and today's "outside allocation" alerts (auser on 0–3, duser on 6–7) disappear. |
 
 ## Constraints (in addition to the inherited ones)
 

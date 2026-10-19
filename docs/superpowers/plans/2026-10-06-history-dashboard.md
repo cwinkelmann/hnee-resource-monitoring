@@ -285,11 +285,11 @@ CREATE INDEX IF NOT EXISTS alerts_ts ON alerts(ts);
 ```
 
   - `tests/history_fixture.py` provides `build_history(path, start: datetime, hours: int, interval_s: int = 300, gap: tuple[datetime, datetime] | None = None) -> None`. It drives a real `EnergyLedger(max_gap_s=interval_s*5)` and a real `HistoryWriter` over synthetic snapshots:
-    - 8 GPUs; GPUs 6 and 7 held by `"dorian.zwanzig"` at ~575 W / 100 % (name `"python kev_run.py"`; GPU 6 restarts with a **new pid** every 6 hours so the timeline has several jobs).
+    - 8 GPUs; GPUs 6 and 7 held by `"duser"` at ~575 W / 100 % (name `"python kev_run.py"`; GPU 6 restarts with a **new pid** every 6 hours so the timeline has several jobs).
     - GPU 5 held by `"cwinkelmann"` (name `"python train.py"`) at 300 W / 60 % during even hours, idle (66 W) otherwise.
     - GPU 4 holds an unattributed process (user None, name None, 2048 MiB) at 70 W / 0 %.
     - GPUs 0–3 idle at 66 W.
-    - Every poll records one allocation Alert for dorian on GPU 6 (`sent` only on the first poll).
+    - Every poll records one allocation Alert for duser on GPU 6 (`sent` only on the first poll).
     - Polls inside `gap` are skipped (so the ledger returns `dt_s=None` after it).
     - Later tasks use this fixture; it must be deterministic (no `now()`).
 
@@ -309,7 +309,7 @@ T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 
 def _snap(t):
     return Snapshot(t, (GpuState(6, 81559, 22715, 100, 575.0),),
-                    (GpuProcess(42, 6, 22706, "dorian.zwanzig", "python kev_run.py"),
+                    (GpuProcess(42, 6, 22706, "duser", "python kev_run.py"),
                      GpuProcess(43, 6, 9, None, None)))
 
 
@@ -320,17 +320,17 @@ def _rows(db, sql):
 def test_record_writes_one_transaction_across_all_tables(tmp_path):
     db = tmp_path / "h.sqlite"
     w = HistoryWriter(db)
-    a = Alert(kind="allocation", key="allocation:dorian.zwanzig:6", text="x", gpu_index=6,
-              user="dorian.zwanzig")
-    w.record(_snap(T0), 60.0, [EnergyRow(6, "dorian.zwanzig", 0.0096, 60.0)], [a], {a.key})
+    a = Alert(kind="allocation", key="allocation:duser:6", text="x", gpu_index=6,
+              user="duser")
+    w.record(_snap(T0), 60.0, [EnergyRow(6, "duser", 0.0096, 60.0)], [a], {a.key})
     w.close()
 
     assert _rows(db, "SELECT ts, dt_s FROM polls") == [(T0.isoformat(), 60.0)]
     assert _rows(db, "SELECT gpu, used_mib, util_pct, power_w FROM gpu_samples") == [(6, 22715, 100, 575.0)]
     assert sorted(_rows(db, "SELECT pid, user, name FROM proc_samples"), key=lambda r: r[0]) == \
-        [(42, "dorian.zwanzig", "python kev_run.py"), (43, None, None)]
-    assert _rows(db, "SELECT bucket, kwh, seconds FROM energy_samples") == [("dorian.zwanzig", 0.0096, 60.0)]
-    assert _rows(db, "SELECT kind, gpu, user, sent FROM alerts") == [("allocation", 6, "dorian.zwanzig", 1)]
+        [(42, "duser", "python kev_run.py"), (43, None, None)]
+    assert _rows(db, "SELECT bucket, kwh, seconds FROM energy_samples") == [("duser", 0.0096, 60.0)]
+    assert _rows(db, "SELECT kind, gpu, user, sent FROM alerts") == [("allocation", 6, "duser", 1)]
 
 
 def test_first_poll_records_null_interval(tmp_path):
@@ -371,7 +371,7 @@ def test_fixture_builds_a_deterministic_history(tmp_path):
     (n,) = _rows(db, "SELECT COUNT(*) FROM polls")[0]
     assert n == 24 * 12                                   # 5-minute polls
     buckets = {b for (b,) in _rows(db, "SELECT DISTINCT bucket FROM energy_samples")}
-    assert buckets == {"dorian.zwanzig", "cwinkelmann", "(idle)", "(unattributed)"}
+    assert buckets == {"duser", "cwinkelmann", "(idle)", "(unattributed)"}
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -489,7 +489,7 @@ from resourcemonitor.queries import NoHistory, latest, open_ro, timeline, timese
 from tests.history_fixture import build_history
 
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
-ASSIGN = {"dorian.zwanzig": frozenset({0, 1, 2, 3}), "cwinkelmann": frozenset({4, 5, 6, 7})}
+ASSIGN = {"duser": frozenset({0, 1, 2, 3}), "cwinkelmann": frozenset({4, 5, 6, 7})}
 
 
 @pytest.fixture
@@ -517,7 +517,7 @@ def test_latest_reports_gpus_owners_and_assignees(db):
     assert d["stale"] is False and len(d["gpus"]) == 8
     g6 = d["gpus"][6]
     assert g6["assigned_to"] == "cwinkelmann"
-    assert {p["user"] for p in g6["procs"]} == {"dorian.zwanzig"}
+    assert {p["user"] for p in g6["procs"]} == {"duser"}
     assert d["gpus"][4]["procs"][0]["user"] is None          # unattributed stays null
     assert any(a["kind"] == "allocation" for a in d["alerts"])
 
@@ -532,7 +532,7 @@ def test_usage_by_day_has_continuous_periods_and_caveats(db):
               now=T0 + timedelta(hours=48))
     assert [p["start"] for p in u["periods"]] == ["2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07"]
     assert u["periods"][0]["kwh"] == {}                      # before monitoring began
-    assert u["totals"]["kwh"]["dorian.zwanzig"] > u["totals"]["kwh"]["cwinkelmann"] > 0
+    assert u["totals"]["kwh"]["duser"] > u["totals"]["kwh"]["cwinkelmann"] > 0
     assert "(idle)" in u["totals"]["kwh"] and "(unattributed)" in u["totals"]["kwh"]
     assert len(u["caveats"]) == 2
 
@@ -552,7 +552,7 @@ def test_usage_by_week_merges_days(db):
 def test_gpu_hours_for_two_full_gpus_over_a_day(db):
     u = usage(open_ro(db), date(2026, 10, 5), date(2026, 10, 5), "day",
               now=T0 + timedelta(hours=48))
-    assert 47.0 < u["totals"]["gpu_hours"]["dorian.zwanzig"] <= 48.0   # GPUs 6+7 × 24 h
+    assert 47.0 < u["totals"]["gpu_hours"]["duser"] <= 48.0   # GPUs 6+7 × 24 h
 
 
 def test_timeline_shows_who_did_what_when(tmp_path):
@@ -561,7 +561,7 @@ def test_timeline_shows_who_did_what_when(tmp_path):
     tl = timeline(open_ro(p), hours=48, now=T0 + timedelta(hours=48))
     g6 = tl["gpus"]["6"]
     assert len(g6) == 8                                      # new pid every 6 h
-    assert {(j["user"], j["name"]) for j in g6} == {("dorian.zwanzig", "python kev_run.py")}
+    assert {(j["user"], j["name"]) for j in g6} == {("duser", "python kev_run.py")}
     assert [j["ongoing"] for j in g6] == [False] * 7 + [True]
     assert all(j["start"] < j["end"] for j in g6)
     assert tl["gpus"]["4"][0]["user"] is None                # unattributed stays null
@@ -634,7 +634,7 @@ from tests.history_fixture import build_history
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
 NOW = T0 + timedelta(hours=48)
 POLICY = """[assignments]
-"dorian.zwanzig" = [0, 1, 2, 3]
+"duser" = [0, 1, 2, 3]
 "cwinkelmann" = [4, 5, 6, 7]
 [rules]
 idle_util_pct = 5

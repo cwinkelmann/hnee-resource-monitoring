@@ -13,16 +13,16 @@ from resourcemonitor.rules import check_bookings, check_unattributed
 
 TOTAL_MIB = 81559
 IDLE_W = 66.0
-DORIAN = "dorian.zwanzig"
-HELPER_MIB = 512          # dorian's small helper next to the main job on GPU 7
+duser = "duser"
+HELPER_MIB = 512          # duser's small helper next to the main job on GPU 7
 POLICY = Policy(
-    assignments={DORIAN: frozenset({0, 1, 2, 3}), "cwinkelmann": frozenset({4, 5, 6, 7})},
+    assignments={duser: frozenset({0, 1, 2, 3}), "cwinkelmann": frozenset({4, 5, 6, 7})},
     idle_util_pct=5, idle_min_mib=1024, idle_grace_s=1800,
     capacity_free_mib=40960, cooldown_s=3600, channel="#gpu-watch",
 )
 
 _EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
-# cwinkelmann holds nearly all of GPUs 4, 6 and 7 for the whole fixture, so dorian's jobs
+# cwinkelmann holds nearly all of GPUs 4, 6 and 7 for the whole fixture, so duser's jobs
 # on 6 and 7 are "booked_gpu" incidents and 4's unattributed holder is reported.
 BOOKINGS = [Booking(id=i, user="cwinkelmann", gpu=g, vram_mib=79 * 1024, start=_EPOCH,
                     end=_EPOCH + timedelta(days=365 * 100), note=None, created_at=_EPOCH,
@@ -37,9 +37,9 @@ def _snapshot(t: datetime, elapsed_s: int) -> Snapshot:
         if i in (6, 7):
             used, util, power = 22715, 100, 575.0
             pid = 1000 + elapsed_s // (6 * 3600) if i == 6 else 2000
-            procs.append(GpuProcess(pid, i, used, DORIAN, "python kev_run.py"))
+            procs.append(GpuProcess(pid, i, used, duser, "python kev_run.py"))
             if i == 7:
-                procs.append(GpuProcess(2001, 7, HELPER_MIB, DORIAN, "python"))
+                procs.append(GpuProcess(2001, 7, HELPER_MIB, duser, "python"))
                 used += HELPER_MIB
         elif i == 5 and t.hour % 2 == 0:
             used, util, power = 12000, 60, 300.0

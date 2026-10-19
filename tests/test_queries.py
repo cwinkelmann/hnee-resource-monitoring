@@ -42,10 +42,10 @@ def test_latest_reports_gpus_owners_and_assignees(db):
     g6 = d["gpus"][6]
     assert "assigned_to" not in g6 and g6["bookings"] == []
     assert g6["booked_mib"] == 0 and g6["free_mib"] == g6["total_mib"]
-    assert {p["user"] for p in g6["procs"]} == {"dorian.zwanzig"}
+    assert {p["user"] for p in g6["procs"]} == {"duser"}
     assert d["gpus"][4]["procs"][0]["user"] is None          # unattributed stays null
     assert [a["key"] for a in d["alerts"]] == [               # one alert per incident
-        "booking:other:dorian.zwanzig:6", "booking:other:dorian.zwanzig:7", "unattributed:4"]
+        "booking:other:duser:6", "booking:other:duser:7", "unattributed:4"]
     assert "using 22.7 GiB on GPU 7" in d["alerts"][1]["text"]      # job + helper, summed
 
 
@@ -92,7 +92,7 @@ def test_usage_by_day_has_continuous_periods_and_caveats(db):
               now=T0 + timedelta(hours=48))
     assert [p["start"] for p in u["periods"]] == ["2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07"]
     assert u["periods"][0]["kwh"] == {}                      # before monitoring began
-    assert u["totals"]["kwh"]["dorian.zwanzig"] > u["totals"]["kwh"]["cwinkelmann"] > 0
+    assert u["totals"]["kwh"]["duser"] > u["totals"]["kwh"]["cwinkelmann"] > 0
     assert "(idle)" in u["totals"]["kwh"] and "(unattributed)" in u["totals"]["kwh"]
     assert len(u["caveats"]) == 2
 
@@ -123,14 +123,14 @@ def test_usage_by_week_merges_days(db):
 def test_gpu_hours_for_two_full_gpus_over_a_day(db):
     u = usage(open_ro(db), date(2026, 10, 5), date(2026, 10, 5), "day",
               now=T0 + timedelta(hours=48))
-    assert 47.0 < u["totals"]["gpu_hours"]["dorian.zwanzig"] <= 48.0   # GPUs 6+7 × 24 h
+    assert 47.0 < u["totals"]["gpu_hours"]["duser"] <= 48.0   # GPUs 6+7 × 24 h
 
 
 def test_timeline_shows_who_did_what_when(db_nogap):
     tl = timeline(open_ro(db_nogap), hours=48, now=T0 + timedelta(hours=48))
     g6 = tl["gpus"]["6"]
     assert len(g6) == 8                                      # new pid every 6 h
-    assert {(j["user"], j["name"]) for j in g6} == {("dorian.zwanzig", "python kev_run.py")}
+    assert {(j["user"], j["name"]) for j in g6} == {("duser", "python kev_run.py")}
     assert [j["ongoing"] for j in g6] == [False] * 7 + [True]
     assert all(j["start"] < j["end"] for j in g6)
     assert tl["gpus"]["4"][0]["user"] is None                # unattributed stays null
@@ -279,12 +279,12 @@ def test_vram_buckets_per_gpu_match_the_fixture(db):
     assert v["to"] == (T0 + timedelta(hours=48)).isoformat() and v["from"] == T0.isoformat()
     buckets = {g: set().union(*(p["by_user"] for p in d["points"])) for g, d in v["gpus"].items()}
     assert buckets == {"0": set(), "1": set(), "2": set(), "3": set(), "4": {"(unattributed)"},
-                       "5": {"cwinkelmann"}, "6": {"dorian.zwanzig"}, "7": {"dorian.zwanzig"}}
+                       "5": {"cwinkelmann"}, "6": {"duser"}, "7": {"duser"}}
     assert all(d["total_mib"] == 81559 for d in v["gpus"].values())
     g7 = v["gpus"]["7"]["points"]
     assert len(g7) == 42 * 12                                # 48 h of 5-min polls minus the 6 h gap
     assert [p["ts"] for p in g7] == sorted(p["ts"] for p in g7)
-    assert g7[0]["by_user"] == {"dorian.zwanzig": 22715 + 512}       # job + helper, summed
+    assert g7[0]["by_user"] == {"duser": 22715 + 512}       # job + helper, summed
     assert v["gpus"]["4"]["points"][0]["by_user"] == {"(unattributed)": 2048}
 
 
@@ -313,7 +313,7 @@ def test_vram_is_downsampled_by_averaging_with_missing_buckets_as_zero(db):
     assert all(0 < len(d["points"]) <= 50 for d in v["gpus"].values())
     g5 = [p["by_user"].get("cwinkelmann", 0) for p in v["gpus"]["5"]["points"]]
     assert any(0 < x < 12000 for x in g5)                    # chunks span busy and idle hours
-    assert all(p["by_user"]["dorian.zwanzig"] == pytest.approx(23227)
+    assert all(p["by_user"]["duser"] == pytest.approx(23227)
                for p in v["gpus"]["7"]["points"])
 
 

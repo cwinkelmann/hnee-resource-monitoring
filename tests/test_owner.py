@@ -21,7 +21,7 @@ def test_an_unresolvable_uid_returns_none_not_a_number(monkeypatch):
 
     The tool must say 'unattributed' there rather than inventing a name -- reporting
     the wrong person is worse than reporting nobody. See the plan's Measured facts:
-    host uid=1053 dorian.zwanzig becomes uid=65534 nobody in a rootless container.
+    host uid=1053 duser becomes uid=65534 nobody in a rootless container.
     """
     import resourcemonitor.probe as probe
 

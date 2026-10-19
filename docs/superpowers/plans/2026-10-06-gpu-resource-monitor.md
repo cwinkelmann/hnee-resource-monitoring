@@ -20,7 +20,7 @@ Everything in this plan runs on one machine. How to get to it, measured 2026-10-
 | hostname | **`carrot` does NOT resolve** — `Host carrot not found: 2(SERVFAIL)`. Always use the IP. |
 | auth | key-based; `ssh -o BatchMode=yes` succeeds with no password or prompt |
 | hardware | 8 × NVIDIA H100 80GB HBM3, driver 580.178.04 |
-| shared with | `dorian.zwanzig` (UID 1053). Split agreed 2026-08-19: dorian 0–3, cwinkelmann 4–7. |
+| shared with | `duser` (UID 1053). Split agreed 2026-08-19: duser 0–3, cwinkelmann 4–7. |
 
 **The interpreter.** The service runs in the `resourcemonitor` conda env (`~/miniconda3/envs/resourcemonitor`, Python 3.12) by the user's choice. The code stays stdlib-only, but **if that env is removed or renamed, the monitor stops**; recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`. (Originally this plan hardcoded `/usr/bin/python3`; superseded 2026-10-06.)
 
@@ -41,11 +41,11 @@ decisions below are not negotiable.
 | Python 3.12.3 present, outbound HTTPS works | `api.telegram.org` reachable, so Slack will be |
 | Docker is **rootless**, nvidia runtime present | `docker info` → `Context: rootless` |
 | `cwinkelmann` subuid range is `951968:65536` | `/etc/subuid` |
-| `dorian.zwanzig` is **UID 1053** — outside that range | `id -u` |
-| **A rootless container cannot attribute processes** | host: `/proc/3078913` → `uid=1053 name=dorian.zwanzig`; inside `docker run --pid=host`: `uid=65534 name=nobody` |
+| `duser` is **UID 1053** — outside that range | `id -u` |
+| **A rootless container cannot attribute processes** | host: `/proc/3078913` → `uid=1053 name=duser`; inside `docker run --pid=host`: `uid=65534 name=nobody` |
 | **The UID itself is destroyed, not just the name** | `/proc/<pid>/status` → `Uid: 1053` on the host, `Uid: 65534` in the container |
 | `nvidia-smi` alone never gives an owner | it reports PIDs only; `ps`/`/proc` supplies the user |
-| The agreed split is dorian 0–3, cwinkelmann 4–7 | agreed 2026-08-19 |
+| The agreed split is duser 0–3, cwinkelmann 4–7 | agreed 2026-08-19 |
 | `power.draw` and `power.limit` are queryable | 700 W limit per card (H100 80GB HBM3, driver 580.178.04) |
 | **`total_energy_consumption` is NOT supported** | `"not a valid field to query"` — energy must be integrated from `power.draw` |
 | An **idle** H100 still draws ~66 W | measured 63.8–70.4 W across the six idle cards |
@@ -70,7 +70,7 @@ The power rows motivate the idle rule in money rather than etiquette: six cards 
 - **Never send without passing the cooldown.** Every alert path goes through `state.should_send`; there is no direct call from a rule to the notifier.
 - **The webhook URL is read from the environment or a mode-0600 file. It is never committed, never logged, never included in an error message.** Slack webhook URLs are bearer credentials.
 - **Unknown owner is reported as unknown, never guessed.** If `/proc/<pid>` is gone or the UID does not resolve, the alert says so. Silently attributing to the wrong person is worse than saying "unattributed".
-- GPU indices are integers 0–7. Policy keys are OS usernames exactly as `/proc` reports them (`dorian.zwanzig`, `cwinkelmann`).
+- GPU indices are integers 0–7. Policy keys are OS usernames exactly as `/proc` reports them (`duser`, `cwinkelmann`).
 - Timestamps are UTC, ISO-8601, `datetime.now(timezone.utc)`.
 
 ## File Structure
@@ -387,7 +387,7 @@ def test_an_unresolvable_uid_returns_none_not_a_number(monkeypatch):
 
     The tool must say 'unattributed' there rather than inventing a name -- reporting
     the wrong person is worse than reporting nobody. See the plan's Measured facts:
-    host uid=1053 dorian.zwanzig becomes uid=65534 nobody in a rootless container.
+    host uid=1053 duser becomes uid=65534 nobody in a rootless container.
     """
     import resourcemonitor.probe as probe
 
@@ -461,7 +461,7 @@ s = probe()
 for p in s.procs: print(p.pid, p.gpu_index, p.user, p.used_mib)
 "'
 ```
-Expected: a real username (e.g. `dorian.zwanzig`), never `nobody`, never `None`, for any
+Expected: a real username (e.g. `duser`), never `nobody`, never `None`, for any
 live process. If it prints `None` or `nobody`, you are running inside a container —
 re-read the plan's Measured facts.
 
@@ -493,9 +493,9 @@ foreign UID inside a rootless container."
 ```toml
 # deploy/policy.example.toml
 # Who may use which GPUs. Keys are OS usernames exactly as /proc reports them.
-# Agreed 2026-08-19: dorian 0-3, cwinkelmann 4-7.
+# Agreed 2026-08-19: duser 0-3, cwinkelmann 4-7.
 [assignments]
-"dorian.zwanzig" = [0, 1, 2, 3]
+"duser" = [0, 1, 2, 3]
 "cwinkelmann"    = [4, 5, 6, 7]
 
 [rules]
@@ -530,7 +530,7 @@ def _write(tmp_path, body):
 
 GOOD = """
 [assignments]
-"dorian.zwanzig" = [0, 1]
+"duser" = [0, 1]
 "cwinkelmann" = [2, 3]
 [rules]
 idle_util_pct = 5
@@ -546,7 +546,7 @@ channel = "#gpu-watch"
 def test_loads_assignments_as_sets_of_int(tmp_path):
     pol = load_policy(_write(tmp_path, GOOD))
 
-    assert pol.assignments["dorian.zwanzig"] == frozenset({0, 1})
+    assert pol.assignments["duser"] == frozenset({0, 1})
     assert pol.capacity_free_mib == 40960
     assert pol.cooldown_s == 3600
 
@@ -554,7 +554,7 @@ def test_loads_assignments_as_sets_of_int(tmp_path):
 def test_owner_of_gpu_maps_an_index_to_its_assignee(tmp_path):
     pol = load_policy(_write(tmp_path, GOOD))
 
-    assert pol.owner_of_gpu(1) == "dorian.zwanzig"
+    assert pol.owner_of_gpu(1) == "duser"
     assert pol.owner_of_gpu(7) is None, "an unassigned GPU belongs to nobody"
 
 
@@ -683,7 +683,7 @@ from resourcemonitor.policy import Policy
 from resourcemonitor.rules import check_allocation, check_capacity
 
 POL = Policy(
-    assignments={"dorian.zwanzig": frozenset({0, 1, 2, 3}),
+    assignments={"duser": frozenset({0, 1, 2, 3}),
                  "cwinkelmann": frozenset({4, 5, 6, 7})},
     idle_util_pct=5, idle_min_mib=1024, idle_grace_s=1800,
     capacity_free_mib=40960, cooldown_s=3600, channel="#gpu-watch",
@@ -695,18 +695,18 @@ def _snap(gpus, procs):
 
 
 def test_flags_a_user_running_outside_their_assignment():
-    """The real 2026-10-06 situation: dorian on GPUs 6 and 7."""
+    """The real 2026-10-06 situation: duser on GPUs 6 and 7."""
     snap = _snap(
         [GpuState(6, 81559, 22715, 100), GpuState(7, 81559, 27367, 98)],
-        [GpuProcess(3078913, 6, 22706, "dorian.zwanzig"),
-         GpuProcess(3079828, 7, 27358, "dorian.zwanzig")],
+        [GpuProcess(3078913, 6, 22706, "duser"),
+         GpuProcess(3079828, 7, 27358, "duser")],
     )
 
     alerts = check_allocation(snap, POL)
 
     assert len(alerts) == 2
     assert {a.gpu_index for a in alerts} == {6, 7}
-    assert all(a.user == "dorian.zwanzig" for a in alerts)
+    assert all(a.user == "duser" for a in alerts)
     assert all("cwinkelmann" in a.text for a in alerts), "say whose GPU it is"
 
 
@@ -735,8 +735,8 @@ def test_an_unattributed_process_is_not_accused():
 
 
 def test_allocation_key_is_stable_per_user_and_gpu():
-    snap = _snap([GpuState(6, 81559, 1, 1)], [GpuProcess(1, 6, 1, "dorian.zwanzig")])
-    later = _snap([GpuState(6, 81559, 2, 2)], [GpuProcess(99, 6, 2, "dorian.zwanzig")])
+    snap = _snap([GpuState(6, 81559, 1, 1)], [GpuProcess(1, 6, 1, "duser")])
+    later = _snap([GpuState(6, 81559, 2, 2)], [GpuProcess(99, 6, 2, "duser")])
 
     # same user, same GPU, different PID and memory -> one incident, not two
     assert check_allocation(snap, POL)[0].key == check_allocation(later, POL)[0].key
@@ -1045,11 +1045,11 @@ def test_one_hour_at_700w_is_0_7_kwh():
 def test_energy_follows_the_user_holding_the_card():
     led = EnergyLedger()
     g = [GpuState(6, 81559, 22715, 100, 600.0)]
-    p = [GpuProcess(1, 6, 22715, "dorian.zwanzig")]
+    p = [GpuProcess(1, 6, 22715, "duser")]
     led.accumulate(_snap(T0, g, p))
     led.accumulate(_snap(T0 + timedelta(hours=1), g, p))
 
-    assert round(led.totals()["per_user"]["dorian.zwanzig"], 3) == 0.600
+    assert round(led.totals()["per_user"]["duser"], 3) == 0.600
 
 
 def test_two_users_on_one_card_split_by_memory_share():
@@ -1240,7 +1240,7 @@ T0 = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 def test_first_sighting_sends(tmp_path):
     st = State.load(tmp_path / "s.json")
 
-    assert st.should_send("allocation:dorian:6", T0, 3600) is True
+    assert st.should_send("allocation:duser:6", T0, 3600) is True
 
 
 def test_same_incident_is_suppressed_within_the_cooldown(tmp_path):
@@ -1259,9 +1259,9 @@ def test_it_sends_again_once_the_cooldown_expires(tmp_path):
 
 def test_distinct_incidents_do_not_suppress_each_other(tmp_path):
     st = State.load(tmp_path / "s.json")
-    st.should_send("allocation:dorian:6", T0, 3600)
+    st.should_send("allocation:duser:6", T0, 3600)
 
-    assert st.should_send("allocation:dorian:7", T0, 3600) is True
+    assert st.should_send("allocation:duser:7", T0, 3600) is True
 
 
 def test_state_survives_a_restart(tmp_path):
@@ -1364,15 +1364,15 @@ import pytest
 from resourcemonitor.notify import Notifier, build_payload
 from resourcemonitor.rules import Alert
 
-A = Alert(kind="allocation", key="allocation:dorian.zwanzig:6", gpu_index=6,
-          user="dorian.zwanzig",
-          text="dorian.zwanzig is using GPU 6 (22.2 GiB), which is assigned to cwinkelmann.")
+A = Alert(kind="allocation", key="allocation:duser:6", gpu_index=6,
+          user="duser",
+          text="duser is using GPU 6 (22.2 GiB), which is assigned to cwinkelmann.")
 
 
 def test_payload_mentions_the_user_so_slack_notifies_them():
     body = json.dumps(build_payload([A], host="carrot"))
 
-    assert "dorian.zwanzig" in body
+    assert "duser" in body
     assert "carrot" in body
 
 
@@ -1649,7 +1649,7 @@ ssh cwinkelmann@10.188.1.1 'mkdir -p ~/.config/resourcemonitor && \
 # one pass, printing the payload instead of sending it
 ssh cwinkelmann@10.188.1.1 'cd ~/ResourceMonitor && python3 -m resourcemonitor once'
 ```
-Expected on the 2026-10-06 state: two `allocation` alerts naming `dorian.zwanzig` on GPUs
+Expected on the 2026-10-06 state: two `allocation` alerts naming `duser` on GPUs
 6 and 7, no `capacity` alert (GPUs 0–5 are empty), no `idle` alert (both at ~100 %).
 
 Leave it running **without** `--post` for a day before enabling the unit. Read the printed
@@ -1702,8 +1702,8 @@ to users and posts to Slack.
 ## The box
 
 `ssh cwinkelmann@10.188.1.1` — **the name "carrot" does not resolve in DNS, use the IP.**
-Key-based auth, no password. 8 × H100 80GB HBM3, shared with `dorian.zwanzig` (UID 1053);
-the split is dorian 0–3, cwinkelmann 4–7.
+Key-based auth, no password. 8 × H100 80GB HBM3, shared with `duser` (UID 1053);
+the split is duser 0–3, cwinkelmann 4–7.
 
 Run it with `/usr/bin/python3` (3.12.3). conda is deliberately not used and is not on
 `PATH` over non-interactive ssh — the tool is stdlib-only so it keeps working when envs
@@ -1737,7 +1737,7 @@ Any report that states a kWh figure must also state both caveats.
 
 ## The GPU split
 
-dorian 0–3, cwinkelmann 4–7 (agreed 2026-08-19). It lives in
+duser 0–3, cwinkelmann 4–7 (agreed 2026-08-19). It lives in
 `~/.config/resourcemonitor/policy.toml`, not in code.
 
 ## Skills
@@ -1764,7 +1764,7 @@ description: Use when installing, updating or restarting the GPU ResourceMonitor
 | hostname | **`carrot` does not resolve in DNS** (`SERVFAIL`) — use the IP, always |
 | auth | key-based; `ssh -o BatchMode=yes` works with no prompt |
 | python | `/usr/bin/python3` (3.12.3). **conda is not on `PATH`** over non-interactive ssh — which is what we want, since the tool is stdlib-only. |
-| hardware | 8 × H100 80GB HBM3, driver 580.178.04, shared with `dorian.zwanzig` |
+| hardware | 8 × H100 80GB HBM3, driver 580.178.04, shared with `duser` |
 
 Quick liveness check before anything else:
 
@@ -1932,7 +1932,7 @@ A rootless container **can** see host PIDs — `docker run --pid=host` showed
 
 | | host | rootless container, `--pid=host` |
 |---|---|---|
-| `stat /proc/<pid>` | `uid=1053 name=dorian.zwanzig` | `uid=65534 name=nobody` |
+| `stat /proc/<pid>` | `uid=1053 name=duser` | `uid=65534 name=nobody` |
 | `/proc/<pid>/status` | `Uid: 1053` | `Uid: 65534` |
 
 The second row is the important one. The kernel does not fail to *resolve* the UID — it

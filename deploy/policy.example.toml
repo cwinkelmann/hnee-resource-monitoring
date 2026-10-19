@@ -1,7 +1,7 @@
 # Who may use which GPUs. Keys are OS usernames exactly as /proc reports them.
-# Agreed 2026-08-19: dorian 0-3, cwinkelmann 4-7.
+# Agreed 2026-08-19: duser 0-3, cwinkelmann 4-7.
 [assignments]
-"dorian.zwanzig" = [0, 1, 2, 3]
+"duser" = [0, 1, 2, 3]
 "cwinkelmann"    = [4, 5, 6, 7]
 
 [rules]

@@ -22,7 +22,7 @@ SECURITY_STATUSES = (201, 400, 403, 409, 413, 415, 429)
 
 
 def _booking(**over):
-    d = {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 40, "start": S, "end": E}
+    d = {"user": "duser", "gpu": 4, "vram_gib": 40, "start": S, "end": E}
     d.update(over)
     return {k: v for k, v in d.items() if v is not None}
 
@@ -71,7 +71,7 @@ def _post(url, obj, headers=None, raw=None):
 
 
 def test_create_then_cancel_round_trip(live):
-    s, _, body = _post(live + "/api/claims", {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 40,
+    s, _, body = _post(live + "/api/claims", {"user": "duser", "gpu": 4, "vram_gib": 40,
                        "start": "2026-10-06T14:00:00+02:00", "end": "2026-10-06T18:00:00+02:00",
                        "note": "KEV eval"})
     c = json.loads(body)["claim"]
@@ -87,14 +87,14 @@ def test_created_booking_is_listed_and_records_the_socket_ip_not_forwarded_for(l
                        headers={"X-Forwarded-For": "10.9.9.9"})
     assert s == 201 and json.loads(body)["claim"]["created_ip"] == "127.0.0.1"
     with urllib.request.urlopen(live + "/api/claims", timeout=5) as r:
-        assert [c["user"] for c in json.loads(r.read())["claims"]] == ["dorian.zwanzig"]
+        assert [c["user"] for c in json.loads(r.read())["claims"]] == ["duser"]
 
 
 @pytest.mark.parametrize("payload, status, detail", [
-    ({"user": "dorain", "gpu": 4, "vram_gib": 1, "start": S, "end": E}, 400, "unknown user 'dorain'"),
-    ({"user": "dorian.zwanzig", "gpu": "4", "vram_gib": 1, "start": S, "end": E}, 400, "missing or invalid field 'gpu'"),
-    ({"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 1, "start": "2026-10-06T14:00", "end": E}, 400, "times need a date, time and UTC offset"),
-    ({"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 1, "start": S, "end": E, "x": 1}, 400, "unknown field"),
+    ({"user": "dusr", "gpu": 4, "vram_gib": 1, "start": S, "end": E}, 400, "unknown user 'dusr'"),
+    ({"user": "duser", "gpu": "4", "vram_gib": 1, "start": S, "end": E}, 400, "missing or invalid field 'gpu'"),
+    ({"user": "duser", "gpu": 4, "vram_gib": 1, "start": "2026-10-06T14:00", "end": E}, 400, "times need a date, time and UTC offset"),
+    ({"user": "duser", "gpu": 4, "vram_gib": 1, "start": S, "end": E, "x": 1}, 400, "unknown field"),
 ])
 def test_bad_bookings_get_a_specific_400(live, payload, status, detail):
     s, _, body = _post(live + "/api/claims", payload)
@@ -363,11 +363,11 @@ def _get(url):
 
 
 def test_quick_books_then_releases(live):
-    s, _, body = _post(live + "/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 3})
+    s, _, body = _post(live + "/api/claims/quick", {"user": "duser", "gpu": 3})
     c = json.loads(body)["claim"]
     assert s == 201 and (c["kind"], c["vram_mib"], c["note"]) == ("quick", 81559, "quick booking")
     assert c["start"] == T0.isoformat() and c["end"] == "2026-10-07T07:00:00+00:00"
-    s, _, body = _post(live + "/api/claims/quick", {"user": "andre.kliem", "gpu": 3})
+    s, _, body = _post(live + "/api/claims/quick", {"user": "auser", "gpu": 3})
     assert s == 201
     s, _, body = _post(live + "/api/claims/quick", {"user": None, "gpu": 3})
     assert (s, json.loads(body)) == (200, {"claim": None})
@@ -375,27 +375,27 @@ def test_quick_books_then_releases(live):
     assert (s, json.loads(body)) == (200, {"claim": None})            # nothing to release
     claims = _get(live + "/api/claims")["claims"]
     assert [(x["user"], x["cancelled_ip"]) for x in claims] == [
-        ("dorian.zwanzig", "127.0.0.1"), ("andre.kliem", "127.0.0.1")]
+        ("duser", "127.0.0.1"), ("auser", "127.0.0.1")]
 
 
 def test_quick_bookings_appear_in_now_with_their_kind(live):
-    assert _post(live + "/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 3})[0] == 201
+    assert _post(live + "/api/claims/quick", {"user": "duser", "gpu": 3})[0] == 201
     assert _post(live + "/api/claims", _booking(gpu=5, vram_gib=10))[0] == 201
     gpus = {g["gpu"]: g for g in _get(live + "/api/now")["gpus"]}
-    assert [(b["user"], b["kind"]) for b in gpus[3]["bookings"]] == [("dorian.zwanzig", "quick")]
+    assert [(b["user"], b["kind"]) for b in gpus[3]["bookings"]] == [("duser", "quick")]
     assert [b["kind"] for b in gpus[5]["bookings"]] == ["calendar"]
 
 
 @pytest.mark.parametrize("payload, detail", [
-    ({"user": "dorian.zwanzig", "gpu": 3, "vram_gib": 4}, "unknown field"),
-    ({"user": "dorian.zwanzig", "gpu": True}, "missing or invalid field 'gpu'"),
-    ({"user": "dorian.zwanzig", "gpu": "3"}, "missing or invalid field 'gpu'"),
-    ({"user": "dorian.zwanzig"}, "missing or invalid field 'gpu'"),
+    ({"user": "duser", "gpu": 3, "vram_gib": 4}, "unknown field"),
+    ({"user": "duser", "gpu": True}, "missing or invalid field 'gpu'"),
+    ({"user": "duser", "gpu": "3"}, "missing or invalid field 'gpu'"),
+    ({"user": "duser"}, "missing or invalid field 'gpu'"),
     ({"gpu": 3}, "missing or invalid field 'user'"),
     ({"user": 5, "gpu": 3}, "missing or invalid field 'user'"),
-    ({"user": "dorain", "gpu": 3}, "unknown user 'dorain'"),
+    ({"user": "dusr", "gpu": 3}, "unknown user 'dusr'"),
     ({"user": "<script>", "gpu": 3}, "invalid user name"),
-    ({"user": "dorian.zwanzig", "gpu": 8}, "GPU must be 0–7"),
+    ({"user": "duser", "gpu": 8}, "GPU must be 0–7"),
 ])
 def test_quick_bad_requests_are_400(live, payload, detail):
     s, _, body = _post(live + "/api/claims/quick", payload)
@@ -404,14 +404,14 @@ def test_quick_bad_requests_are_400(live, payload, detail):
 
 def test_quick_is_409_while_a_calendar_booking_is_active(live):
     assert _post(live + "/api/claims", _booking(gpu=3, vram_gib=10))[0] == 201
-    s, _, body = _post(live + "/api/claims/quick", {"user": "andre.kliem", "gpu": 3})
+    s, _, body = _post(live + "/api/claims/quick", {"user": "auser", "gpu": 3})
     assert (s, json.loads(body)) == (409, {"error": "conflict",
                                            "detail": "GPU 3 has calendar bookings — use the calendar"})
 
 
 def test_quick_rejects_foreign_origin_and_non_json(live):
     url = live + "/api/claims/quick"
-    q = {"user": "dorian.zwanzig", "gpu": 3}
+    q = {"user": "duser", "gpu": 3}
     s, _, body = _post(url, q, headers={"Origin": "http://evil.example"})
     assert (s, json.loads(body)) == (403, {"error": "forbidden"})
     s, _, body = _post(url, q, headers={"Content-Type": "text/plain"})
@@ -424,14 +424,14 @@ def test_quick_rejects_foreign_origin_and_non_json(live):
 
 def test_quick_counts_against_the_write_rate_limit(live, monkeypatch):
     monkeypatch.setattr(web, "_WRITES", web._RateLimiter(limit=1))
-    assert _post(live + "/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 3})[0] == 201
+    assert _post(live + "/api/claims/quick", {"user": "duser", "gpu": 3})[0] == 201
     s, _, body = _post(live + "/api/claims/quick", {"user": None, "gpu": 3})
     assert (s, json.loads(body)) == (429, {"error": "too many requests"})
 
 
 def test_quick_responses_carry_the_security_headers(live):
     url = live + "/api/claims/quick"
-    for payload, status in (({"user": "dorian.zwanzig", "gpu": 3}, 201), ({"user": None, "gpu": 3}, 200),
+    for payload, status in (({"user": "duser", "gpu": 3}, 201), ({"user": None, "gpu": 3}, 200),
                             ({"user": None, "gpu": True}, 400)):
         s, headers, _ = _post(url, payload)
         assert s == status
@@ -458,7 +458,7 @@ def test_booking_without_vram_takes_the_whole_card(live, over):
 
 
 def test_whole_card_booking_against_an_existing_share_is_409(live):
-    assert _post(live + "/api/claims", _booking(user="andre.kliem", vram_gib=1))[0] == 201
+    assert _post(live + "/api/claims", _booking(user="auser", vram_gib=1))[0] == 201
     payload = _booking()
     del payload["vram_gib"]
     s, _, body = _post(live + "/api/claims", payload)
@@ -480,7 +480,7 @@ def test_whole_card_booking_uses_the_latest_poll_total(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("route, payload", [
     ("/api/claims", _booking(gpu=10**20)),
-    ("/api/claims/quick", {"user": "dorian.zwanzig", "gpu": 10**20}),
+    ("/api/claims/quick", {"user": "duser", "gpu": 10**20}),
 ], ids=["calendar", "quick"])
 def test_huge_gpu_number_is_a_400_not_a_500(live, route, payload):
     s, _, body = _post(live + route, payload)
@@ -515,7 +515,7 @@ def test_important_over_a_running_lendable_is_moved_and_reports_the_take(live):
     assert r["claim"]["start"] == "2026-10-06T12:30:00+00:00"
     (t,) = r["takes"]
     assert (t["id"], t["user"], t["start"], t["end"]) == (
-        lend["id"], "dorian.zwanzig", "2026-10-06T12:30:00+00:00", "2026-10-06T16:00:00+00:00")
+        lend["id"], "duser", "2026-10-06T12:30:00+00:00", "2026-10-06T16:00:00+00:00")
     assert t["vram_gib"] == round(t["vram_mib"] / 1024, 1) and t["vram_mib"] > 0
 
     listing = _get(live + "/api/claims")

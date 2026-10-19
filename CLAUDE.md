@@ -6,8 +6,8 @@ to users and posts to Slack.
 ## The box
 
 `ssh cwinkelmann@10.188.1.1` — **the name "carrot" does not resolve in DNS, use the IP.**
-Key-based auth, no password. 8 × H100 80GB HBM3, shared with `dorian.zwanzig` (UID 1053);
-the split is dorian 0–3, cwinkelmann 4–7.
+Key-based auth, no password. 8 × H100 80GB HBM3, shared with `duser` (UID 1053);
+the split is duser 0–3, cwinkelmann 4–7.
 
 The service runs in the `resourcemonitor` conda env (`~/miniconda3/envs/resourcemonitor`, Python 3.12) by the user's choice. The code stays stdlib-only, but **if that env is removed or renamed, the monitor stops**; recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest`.
 
@@ -42,7 +42,7 @@ Any report that states a kWh figure must also state both caveats.
 
 ## The GPU split
 
-dorian 0–3, cwinkelmann 4–7 (agreed 2026-08-19). It lives in
+duser 0–3, cwinkelmann 4–7 (agreed 2026-08-19). It lives in
 `~/.config/resourcemonitor/policy.toml`, not in code.
 
 ## Skills

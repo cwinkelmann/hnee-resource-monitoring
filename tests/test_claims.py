@@ -25,14 +25,14 @@ def _err(fn):
 
 def test_create_returns_the_stored_booking(store):
     b = book(store, note="KEV eval")
-    assert (b.user, b.gpu, b.vram_mib, b.note, b.created_ip) == ("dorian.zwanzig", 4, 40960, "KEV eval", "10.0.0.1")
+    assert (b.user, b.gpu, b.vram_mib, b.note, b.created_ip) == ("duser", 4, 40960, "KEV eval", "10.0.0.1")
     assert b.start == T0 and b.end == T0 + timedelta(hours=4) and b.cancelled_at is None
     assert store.get(b.id) == b
 
 
 @pytest.mark.parametrize("kwargs, status, detail", [
     ({"user": "Bad Name"}, 400, "invalid user name"),
-    ({"user": "dorain.zwanzig"}, 400, "unknown user 'dorain.zwanzig'"),
+    ({"user": "dusr"}, 400, "unknown user 'dusr'"),
     ({"gpu": 8}, 400, "GPU must be 0–7"),
     ({"gib": 0}, 400, "VRAM must be between 1 and 79 GiB"),
     ({"gib": 80}, 400, "VRAM must be between 1 and 79 GiB"),
@@ -60,14 +60,14 @@ def test_blank_note_is_stored_as_null(store):
 
 def test_overbooking_is_409_with_the_free_amount(store):
     book(store, user="cwinkelmann", gib=40)
-    status, detail = _err(lambda: book(store, user="andre.kliem", gib=40))
+    status, detail = _err(lambda: book(store, user="auser", gib=40))
     assert status == 409
     assert detail.startswith("GPU 4 has only 39.6 GiB unbooked between Tue 06 Oct 12:00 UTC and Tue 06 Oct 16:00 UTC")
 
 
 def test_two_shares_that_fit_both_succeed(store):
     book(store, user="cwinkelmann", gib=40)
-    assert book(store, user="andre.kliem", gib=39).vram_mib == 39 * 1024
+    assert book(store, user="auser", gib=39).vram_mib == 39 * 1024
 
 
 def test_back_to_back_full_card_bookings_do_not_conflict(store):
@@ -78,14 +78,14 @@ def test_back_to_back_full_card_bookings_do_not_conflict(store):
 def test_capacity_is_checked_at_the_worst_instant(store):
     # A: 30 GiB 12-14, B: 30 GiB 13-16. New 30 GiB 12-16 collides only during 13-14 (90 > 79.6).
     book(store, user="cwinkelmann", gib=30, hours=2)
-    book(store, user="andre.kliem", gib=30, start=T0 + timedelta(hours=1), hours=3)
+    book(store, user="auser", gib=30, start=T0 + timedelta(hours=1), hours=3)
     status, detail = _err(lambda: book(store, gib=30, hours=4))
     assert status == 409 and "between Tue 06 Oct 13:00 UTC and Tue 06 Oct 14:00 UTC" in detail
 
 
 def test_other_gpus_and_cancelled_bookings_do_not_count(store):
     other = book(store, user="cwinkelmann", gpu=5, gib=79)
-    gone = book(store, user="andre.kliem", gib=79)
+    gone = book(store, user="auser", gib=79)
     store.cancel(gone.id, ip="10.0.0.2", now=T0)
     assert book(store, gib=79).gpu == 4 and other.gpu == 5
 
@@ -134,7 +134,7 @@ def test_parallel_bookings_for_the_last_share_exactly_one_wins(tmp_path):
         finally:
             s.close()
 
-    ts = [threading.Thread(target=attempt, args=(u,)) for u in ("cwinkelmann", "andre.kliem")]
+    ts = [threading.Thread(target=attempt, args=(u,)) for u in ("cwinkelmann", "auser")]
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert sorted(results, key=str) == [409, "ok"]
@@ -236,19 +236,19 @@ TOMORROW_9 = datetime(2026, 10, 7, 7, 0, tzinfo=UTC)          # T0 is 14:00 Berl
 
 
 def test_quick_books_the_whole_card_until_0900(store):
-    b = store.quick(user="dorian.zwanzig", gpu=3, ip="10.0.0.1", now=T0, card_mib=81559)
-    assert (b.user, b.gpu, b.vram_mib, b.kind, b.note) == ("dorian.zwanzig", 3, 81559, "quick", "quick booking")
+    b = store.quick(user="duser", gpu=3, ip="10.0.0.1", now=T0, card_mib=81559)
+    assert (b.user, b.gpu, b.vram_mib, b.kind, b.note) == ("duser", 3, 81559, "quick", "quick booking")
     assert b.start == T0 and b.end == TOMORROW_9
     assert store.get(b.id) == b and b.to_json()["kind"] == "quick"
 
 
 def test_quick_replace_cancels_the_old_one_with_the_ip(store):
-    old = store.quick(user="dorian.zwanzig", gpu=3, ip="10.0.0.1", now=T0)
+    old = store.quick(user="duser", gpu=3, ip="10.0.0.1", now=T0)
     later = T0 + timedelta(minutes=10)
-    new = store.quick(user="andre.kliem", gpu=3, ip="10.0.0.2", now=later)
+    new = store.quick(user="auser", gpu=3, ip="10.0.0.2", now=later)
     gone = store.get(old.id)
     assert (gone.cancelled_at, gone.cancelled_ip) == (later, "10.0.0.2")
-    assert new.user == "andre.kliem" and new.cancelled_at is None
+    assert new.user == "auser" and new.cancelled_at is None
     assert [b.id for b in load_active(store_path(store), later)] == [new.id]
 
 
@@ -257,14 +257,14 @@ def store_path(store):
 
 
 def test_quick_release_and_release_when_none(store):
-    b = store.quick(user="dorian.zwanzig", gpu=3, ip="10.0.0.1", now=T0)
+    b = store.quick(user="duser", gpu=3, ip="10.0.0.1", now=T0)
     assert store.quick(user=None, gpu=3, ip="10.0.0.3", now=T0 + timedelta(minutes=1)) is None
     assert store.get(b.id).cancelled_ip == "10.0.0.3"
     assert store.quick(user=None, gpu=3, ip="10.0.0.3", now=T0 + timedelta(minutes=2)) is None
 
 
 def test_quick_leaves_other_gpus_alone(store):
-    other = store.quick(user="dorian.zwanzig", gpu=2, ip="10.0.0.1", now=T0)
+    other = store.quick(user="duser", gpu=2, ip="10.0.0.1", now=T0)
     store.quick(user=None, gpu=3, ip="10.0.0.1", now=T0)
     assert store.get(other.id).cancelled_at is None
 
@@ -276,13 +276,13 @@ def test_quick_leaves_other_gpus_alone(store):
     ({"user": "nobody.here"}, "unknown user 'nobody.here'"),
 ])
 def test_quick_validation(store, kwargs, detail):
-    args = {"user": "dorian.zwanzig", "gpu": 3, "ip": "10.0.0.1", "now": T0, **kwargs}
+    args = {"user": "duser", "gpu": 3, "ip": "10.0.0.1", "now": T0, **kwargs}
     assert _err(lambda: store.quick(**args)) == (400, detail)
 
 
 def test_quick_is_refused_while_a_calendar_booking_is_active(store):
     cal = book(store, gpu=3, gib=10)
-    status, detail = _err(lambda: store.quick(user="andre.kliem", gpu=3, ip="x", now=T0))
+    status, detail = _err(lambda: store.quick(user="auser", gpu=3, ip="x", now=T0))
     assert (status, detail) == (409, "GPU 3 has calendar bookings — use the calendar")
     assert _err(lambda: store.quick(user=None, gpu=3, ip="x", now=T0))[0] == 409
     assert store.get(cal.id).cancelled_at is None
@@ -290,20 +290,20 @@ def test_quick_is_refused_while_a_calendar_booking_is_active(store):
 
 def test_quick_end_is_clipped_to_a_future_calendar_booking(store):
     book(store, gpu=3, gib=10, start=T0 + timedelta(hours=6), now=T0)
-    b = store.quick(user="andre.kliem", gpu=3, ip="x", now=T0)
+    b = store.quick(user="auser", gpu=3, ip="x", now=T0)
     assert b.end == T0 + timedelta(hours=6)
     # The calendar booking is never overbooked: it starts exactly where the quick one ends.
 
 
 def test_quick_is_refused_when_less_than_a_minute_remains(store):
     book(store, gpu=3, gib=10, start=T0 + timedelta(seconds=59), hours=1, now=T0)
-    status, detail = _err(lambda: store.quick(user="andre.kliem", gpu=3, ip="x", now=T0))
+    status, detail = _err(lambda: store.quick(user="auser", gpu=3, ip="x", now=T0))
     assert (status, detail) == (409, "GPU 3 is booked from Tue 06 Oct 12:00 UTC — use the calendar")
 
 
 def test_quick_with_exactly_one_minute_is_allowed(store):
     book(store, gpu=3, gib=10, start=T0 + timedelta(minutes=1), hours=1, now=T0)
-    assert store.quick(user="andre.kliem", gpu=3, ip="x", now=T0).end == T0 + timedelta(minutes=1)
+    assert store.quick(user="auser", gpu=3, ip="x", now=T0).end == T0 + timedelta(minutes=1)
 
 
 def test_create_still_makes_calendar_bookings(store):
@@ -318,7 +318,7 @@ CREATE TABLE claims (
   cancelled_ip TEXT);
 CREATE INDEX claims_gpu_window ON claims(gpu, start, end);
 INSERT INTO claims (user, gpu, vram_mib, start, end, note, created_at, created_ip)
-  VALUES ('dorian.zwanzig', 4, 40960, '2026-10-06T12:00:00+00:00', '2026-10-06T16:00:00+00:00',
+  VALUES ('duser', 4, 40960, '2026-10-06T12:00:00+00:00', '2026-10-06T16:00:00+00:00',
           NULL, '2026-10-06T12:00:00+00:00', '10.0.0.1');
 PRAGMA user_version = 1;
 """
@@ -346,7 +346,7 @@ def test_opening_a_version_1_file_migrates_it_to_the_current_version(tmp_path):
     _v1(path)
     s = ClaimsStore(path, users=FakeUsers())
     try:
-        assert s.get(1).kind == "calendar" and s.get(1).user == "dorian.zwanzig"
+        assert s.get(1).kind == "calendar" and s.get(1).user == "duser"
         assert [b.kind for b in s.list_window(T0)] == ["calendar"]
         assert s.get(1).priority == "important"
     finally:
@@ -369,18 +369,18 @@ def test_new_files_are_created_at_the_current_version_with_kind(tmp_path):
 
 
 def test_calendar_booking_on_a_quick_held_card_names_the_holder(store):
-    store.quick(user="dorian.zwanzig", gpu=3, ip="x", now=T0)
-    status, detail = _err(lambda: book(store, user="andre.kliem", gpu=3, gib=10,
+    store.quick(user="duser", gpu=3, ip="x", now=T0)
+    status, detail = _err(lambda: book(store, user="auser", gpu=3, gib=10,
                                        start=T0 + timedelta(hours=1)))
-    assert (status, detail) == (409, "GPU 3 is held by dorian.zwanzig until 09:00 "
+    assert (status, detail) == (409, "GPU 3 is held by duser until 09:00 "
                                      "(quick booking) — set its holder to free first")
 
 
 def test_quick_hold_conflict_shows_the_clipped_end_in_berlin_time(store):
     book(store, gpu=3, gib=10, start=T0 + timedelta(hours=2), hours=1, now=T0)   # 16:00 Berlin
-    store.quick(user="dorian.zwanzig", gpu=3, ip="x", now=T0)
-    status, detail = _err(lambda: book(store, user="andre.kliem", gpu=3, gib=10, hours=1))
-    assert (status, detail) == (409, "GPU 3 is held by dorian.zwanzig until 16:00 "
+    store.quick(user="duser", gpu=3, ip="x", now=T0)
+    status, detail = _err(lambda: book(store, user="auser", gpu=3, gib=10, hours=1))
+    assert (status, detail) == (409, "GPU 3 is held by duser until 16:00 "
                                      "(quick booking) — set its holder to free first")
 
 
@@ -399,7 +399,7 @@ def _write_v3(path):
     conn = sqlite3.connect(str(path))
     conn.executescript(_V3_SCHEMA)
     conn.execute("INSERT INTO claims (user, gpu, vram_mib, start, end, created_at, "
-                 "created_ip, priority) VALUES ('dorian.zwanzig', 4, 40960, "
+                 "created_ip, priority) VALUES ('duser', 4, 40960, "
                  "'2026-10-06T12:00:00+00:00', '2026-10-06T16:00:00+00:00', "
                  "'2026-10-06T11:00:00+00:00', '10.0.0.1', 'lendable')")
     conn.commit()
@@ -417,7 +417,7 @@ def test_a_v3_file_migrates_and_keeps_every_row(tmp_path):
     try:
         got = store.get(1)
         assert got is not None
-        assert got.user == "dorian.zwanzig" and got.priority == "lendable"
+        assert got.user == "duser" and got.priority == "lendable"
         assert got.auto_advance is False
         assert got.group_id is None
         assert got.notice_seconds is None

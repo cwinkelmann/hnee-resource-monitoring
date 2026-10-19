@@ -183,7 +183,7 @@ def test_a_started_booking_does_not_count_against_the_limit(store):
 def test_the_limit_is_per_user(store):
     _assign(store, max_pending=1, vram_mib=79 * 1024)
     _assign(store, max_pending=1, vram_mib=79 * 1024)
-    _assign(store, user="dorian.zwanzig", max_pending=1, vram_mib=79 * 1024)
+    _assign(store, user="duser", max_pending=1, vram_mib=79 * 1024)
 
 
 def test_a_group_counts_as_one_row_per_card(store):

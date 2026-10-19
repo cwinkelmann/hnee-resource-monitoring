@@ -5,7 +5,7 @@ from resourcemonitor.policy import Policy
 from resourcemonitor.rules import check_capacity
 
 POL = Policy(
-    assignments={"dorian.zwanzig": frozenset({0, 1, 2, 3}),
+    assignments={"duser": frozenset({0, 1, 2, 3}),
                  "cwinkelmann": frozenset({4, 5, 6, 7})},
     idle_util_pct=5, idle_min_mib=1024, idle_grace_s=1800,
     capacity_free_mib=40960, cooldown_s=3600, channel="#gpu-watch",
