@@ -17,7 +17,7 @@ Energy is also tracked (see Energy below). Unknown owners are reported as unknow
 
 | fact | consequence |
 |---|---|
-| Services run in the `resourcemonitor` conda env (user's choice) | stdlib only; units hardcode `%h/miniconda3/envs/resourcemonitor/bin/python`. If the env is removed or renamed the monitor stops: `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest` |
+| Services run in the `resourcemonitor` conda env (user's choice) | stdlib only; `deploy/run-resourcemonitor.sh` takes that env when it exists and falls back to `python3`, so a host without conda (the t14) still runs. Recreate it with `~/miniconda3/bin/conda create -y -n resourcemonitor python=3.12 pytest` |
 | `systemd --user` works, `Linger=yes` | runs as a user service, no root |
 | Docker is rootless; `dorian.zwanzig` is UID 1053, outside `cwinkelmann`'s subuid range | **cannot run in a rootless container**: inside, `/proc/<pid>` shows `uid=65534 nobody` for other users, so attribution is destroyed |
 | `nvidia-smi` reports PIDs only | owner comes from `/proc` |
@@ -42,6 +42,12 @@ the payloads. Options: `--policy`, `--state`, `--energy`, `--interval`, `--price
 
 ## Setup
 
+1. Copy `deploy/host.env.example` to `~/.config/resourcemonitor/host.env` and set this
+   machine's bind address (`carrot` 10.188.1.1, `olive` 10.188.2.1, `t14` 192.168.188.88).
+   Without it the dashboard binds 127.0.0.1 only, so a new host is never exposed by accident.
+   The units are host-agnostic: they all start `deploy/run-resourcemonitor.sh`, which reads
+   this file. systemd cannot take `ExecStart`'s executable from a variable, which is why the
+   wrapper exists at all.
 1. Copy `deploy/policy.example.toml` to `~/.config/resourcemonitor/policy.toml` and edit.
 2. Webhook: put `SLACK_WEBHOOK_URL=...` in `~/.config/resourcemonitor/env` (mode 0600).
    The URL is a bearer credential: never commit or log it, and never put it in a command line
@@ -111,6 +117,39 @@ booking has already started, the important one starts no earlier than `grace_min
 alert. A lendable booking must fit into what is unbooked. Bookings made before this existed
 count as important. Nothing about a take is stored: cancelling the important booking gives the
 capacity back.
+
+**Assigned slots.** A booking with no start never fails for lack of capacity: the server
+assigns the earliest window that fits and answers with it (`assigned_later: true` when that
+is not now). Tick **Earliest slot** on the form and give a length in minutes; tick **Move
+earlier if a card frees up** and the slot moves itself forward whenever someone releases
+early. `count` books several cards atomically -- one `group_id`, one shared start, so a job
+that needs four GPUs never holds idle ones waiting for the fourth. `max_pending_per_user`
+(default 16, `[booking]` in `policy.toml`) caps how many not-yet-started bookings one person
+may hold, counted in rows, so a long pipeline cannot own the calendar.
+
+**Releasing.** `POST /api/claims/<id>/release` moves a started booking's `end` to now
+instead of cancelling it, so the window actually used stays on the calendar and in the
+energy ledger; a booking that has not started is cancelled instead. The reply lists the
+assigned slots that moved earlier because of it.
+
+**Revocation and the watch channel.** A job holding a lendable booking can declare
+`notice_seconds` -- how much warning it needs before giving up the card -- and park a
+long-poll on `GET /api/claims/<id>/events`. That request answers nothing until the booking
+is taken or cancelled, then returns one JSON event and closes (`204` after 60 s, reconnect).
+A declared notice may only ever *shorten* the wait, never lengthen it past `grace_minutes`,
+and it counts only while the watcher is actually parked: a crashed job keeps the full grace.
+When an important booking starts, a victim left with less than 1 GiB has its `end` truncated
+to that instant and the freed tail advances whoever is waiting. `max_watchers` (default 64)
+caps the parked connections; past it the route answers 503 and clients fall back to polling.
+The server writes rows and notifies clients -- it never signals a process. `deploy/acceptance-slots.py`
+drives the whole path against a live server:
+
+```bash
+python3 deploy/acceptance-slots.py --base http://10.188.1.1:8765 --user cwinkelmann --gib 20
+```
+
+It refuses to start until `watch` has recorded one poll, because without history the server
+assumes 81559 MiB cards and the run would prove nothing on a smaller GPU.
 
 This is an **honour system**. The dashboard is unauthenticated, so anyone on the LAN can book
 or cancel in any name; every change is shown with its time and IP address. Anyone who can

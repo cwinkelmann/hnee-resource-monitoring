@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 import re
+import select
 import socket
 import sqlite3
 import threading
@@ -22,8 +23,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from resourcemonitor.claims import (DEFAULT_CARD_MIB, DEFAULT_CLAIMS, DEFAULT_GRACE, GPU_COUNT,
                                     MIB_PER_GIB, ClaimError, ClaimsStore, PwdUsers,
-                                    UserDirectory, list_window_ro, load_active, parse_time,
-                                    taken_segments)
+                                    UserDirectory, get_ro, list_window_ro, load_active,
+                                    parse_time, taken_segments)
+from resourcemonitor.watchers import Watchers
 from resourcemonitor.paths import DEFAULT_HISTORY, DEFAULT_POLICY
 from resourcemonitor.policy import load_policy
 from resourcemonitor.queries import (NoHistory, _seg_json, latest, open_ro, timeline,
@@ -47,18 +49,30 @@ MAX_BODY = 4096
 _DRAIN_MAX = 64 * 1024                          # unread body bytes swallowed before a rejection
 _DRAIN_TIMEOUT_S = 1
 _CANCEL = re.compile(r"^/api/claims/(\d{1,9})/cancel$", re.ASCII)
+_RELEASE = re.compile(r"^/api/claims/(\d{1,9})/release$", re.ASCII)
+_EVENTS = re.compile(r"^/api/claims/(\d{1,9})/events$", re.ASCII)
+EVENT_HOLD_S = 60        # how long one request is parked before the client reconnects
+EVENT_POLL_S = 0.5       # how often a parked request checks whether its client is gone
 _GET_ONLY = frozenset(STATIC) | {"/favicon.ico", "/api/now", "/api/usage", "/api/timeseries",
-                                 "/api/vram", "/api/timeline", "/api/users", "/healthz"}
-_CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note", "priority")
+                                 "/api/vram", "/api/timeline", "/api/users", "/healthz",
+                                 "/api/capacity"}
+_CLAIM_FIELDS = ("user", "gpu", "vram_gib", "start", "end", "note", "priority",
+                 "auto_advance", "duration_minutes", "not_later_than", "count",
+                 "notice_seconds")
+MAX_DURATION_MIN = 14 * 24 * 60
 _QUICK = "/api/claims/quick"
 _QUICK_FIELDS = ("user", "gpu")
 _CLAIM_ERRORS = {400: "invalid", 404: "not found", 409: "conflict"}
 
 
 class _RateLimiter:
-    """At most `limit` writes per client IP in any rolling `window_s` (in memory)."""
+    """At most `limit` writes per client IP in any rolling `window_s` (in memory).
 
-    def __init__(self, limit: int = 30, window_s: float = 3600):
+    3600/h is one write a second: a runaway-loop backstop, not a quota. The real load is
+    a job booking and releasing its own slot -- 13,000 one-hour jobs at 32 concurrent
+    slots is about 64 writes an hour, and a fleet starting at once is a burst of 32."""
+
+    def __init__(self, limit: int = 3600, window_s: float = 3600):
         self.limit = limit
         self.window_s = window_s
         self._hits: dict[str, deque] = {}
@@ -181,10 +195,17 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/favicon.ico":       # browsers ask regardless; the page links the SVG
                 self._send(204, b"", "text/plain")
                 return
+            m_events = _EVENTS.match(path)
+            if m_events is not None:
+                # Not in _HEAVY: those two semaphore slots stop SQLite scans piling up,
+                # and a request parked for a minute holding one would stall the dashboard.
+                self._events(int(m_events.group(1)))
+                return
             handler = {"/api/now": self._now, "/api/usage": self._usage,
                        "/api/timeseries": self._timeseries, "/api/vram": self._vram,
                        "/api/timeline": self._timeline,
                        "/api/claims": self._claims, "/api/users": self._users,
+                       "/api/capacity": self._capacity,
                        "/healthz": self._healthz}.get(path)
             if handler is None:
                 self._json(404, {"error": "not found"})
@@ -202,6 +223,8 @@ class _Handler(BaseHTTPRequestHandler):
                 slots.release()
         except BadRequest:
             self._json(400, {"error": "bad request"})
+        except ClaimError as e:
+            self._claim_error(e)
         except NoHistory:
             if path == "/healthz":
                 self._json(503, {"ok": False})
@@ -218,7 +241,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._method_not_allowed()
             return
         m = _CANCEL.match(path)
-        if path not in ("/api/claims", _QUICK) and m is None:
+        m_release = _RELEASE.match(path)
+        if path not in ("/api/claims", _QUICK) and m is None and m_release is None:
             self._drain()
             self._json(404, {"error": "not found"})
             return
@@ -230,30 +254,122 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(200, {"claim": None})
                 else:
                     self._json(201, {"claim": claim.to_json()})
+            elif m_release is not None:
+                out = self._release(int(m_release.group(1)), body)
+                self._json(200, {"claim": out.booking.to_json(),
+                                 "advanced": out.advanced})
             elif m is None:
                 made = self._create(body)
+                # After _create returned, so the store's transaction is committed and its
+                # lock released: the Watchers lock is never held across the claims lock.
+                for r in made.revoked:
+                    self.server.watchers.notify(r["id"], {
+                        "event": "taken", "effective_mib": r["effective_mib"],
+                        "lost_mib": r["lost_mib"], "by": r["by"],
+                        "truncated": r["truncated"], "deadline": r["at"]})
                 self._json(201, {
                     "claim": made.booking.to_json(),
+                    "claims": [b.to_json() for b in made.bookings],
                     "takes": [{**t, "start": t["start"].isoformat(),
                                "end": t["end"].isoformat(),
                                "vram_gib": round(t["vram_mib"] / MIB_PER_GIB, 1)}
                               for t in made.takes],
                     "adjusted_start": None if made.adjusted_start is None
-                    else made.adjusted_start.isoformat()})
+                    else made.adjusted_start.isoformat(),
+                    "assigned_later": made.assigned_later,
+                    "revoked": made.revoked})
             else:
                 if body:
                     raise ClaimError(400, "unknown field")
                 claim = self._store().cancel(int(m.group(1)), ip=self.client_address[0],
-                                             now=self.server.clock())
+                                             now=self.server.clock(),
+                                             cards=self._cards())
+                # A cancellation is a revocation notice to the job as much as a take is.
+                self.server.watchers.notify(claim.id, {
+                    "event": "cancelled", "effective_mib": 0, "lost_mib": claim.vram_mib,
+                    "by": [], "truncated": False,
+                    "deadline": claim.cancelled_at.isoformat()})
                 self._json(200, {"claim": claim.to_json()})
         except _Reject as e:
             self._drain()
             self._json(e.status, e.body)
         except ClaimError as e:
-            self._json(e.status, {"error": _CLAIM_ERRORS[e.status], "detail": e.detail})
+            self._claim_error(e)
         except Exception as e:
             print(f"request failed: {e.__class__.__name__}", flush=True)
             self._json(500, {"error": "internal"})
+
+    def _events(self, claim_id: int) -> None:
+        """Park this request until the booking is squeezed or cancelled, then answer with
+        one event. The job dials out because nothing can dial in: the t14 has no route to
+        carrot's subnet. The parked connection is also the liveness signal claims.create()
+        reads through Watchers.attached, which is why a dead job stops being promised
+        notice."""
+        now = self.server.clock()
+        b = get_ro(self.server.claims_path, claim_id)
+        if b is None:
+            self._json(404, {"error": "not found"})
+            return
+        if b.cancelled_at is not None:
+            self._json(409, {"error": "conflict", "detail": "already cancelled"})
+            return
+        if b.end <= now:
+            self._json(409, {"error": "conflict", "detail": "booking is over"})
+            return
+        watch = self.server.watchers.register(claim_id)
+        if watch is None:
+            self._json(503, {"error": "busy"})
+            return
+        with watch:
+            event, gone = self._park(watch)
+        if gone:
+            # Nothing to answer and nobody to answer to; writing would only raise.
+            self.close_connection = True
+            return
+        if event is None:
+            self._send(204, b"", "application/json")
+        else:
+            self._json(200, event)
+
+    def _park(self, watch) -> tuple[dict | None, bool]:
+        """Wait for an event, in slices, giving up as soon as the client disconnects.
+        Returns (event, client_gone).
+
+        The slices are the liveness signal. A parked connection is the only evidence the
+        server has that a job is alive, and claims.create() reads it through
+        Watchers.attached to decide whether a declared notice counts. If a dropped socket
+        left the watch registered until the hold expired, the server would keep promising
+        instant revocation on behalf of a job that is gone -- and a live job whose
+        connection blipped could lose its card with no notice at all."""
+        deadline = time.monotonic() + EVENT_HOLD_S
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None, False
+            event = watch.wait(min(EVENT_POLL_S, left))
+            if event is not None:
+                return event, False
+            if self._peer_gone():
+                return None, True
+
+    def _peer_gone(self) -> bool:
+        """Has the client closed its end? A readable socket that peeks empty is a closed
+        one; a GET has no body, so anything else readable is a pipelined request we are
+        not going to serve on this connection anyway."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
+    def _claim_error(self, e: ClaimError) -> None:
+        """The fixed {error, detail} shape, plus whatever machine-readable extras the store
+        attached -- `earliest` and `free_now` on a 409 -- which may never overwrite it."""
+        body = {"error": _CLAIM_ERRORS[e.status], "detail": e.detail}
+        body.update({k: v for k, v in e.extra.items() if k not in body})
+        self._json(e.status, body)
 
     def _drain(self) -> None:
         """Swallow up to 64 KiB of an unread body (1 s in total), then close after replying.
@@ -310,24 +426,127 @@ class _Handler(BaseHTTPRequestHandler):
         if set(d) - set(_CLAIM_FIELDS):
             raise ClaimError(400, "unknown field")
         user = _field(d, "user", lambda v: isinstance(v, str))
-        gpu = _field(d, "gpu", _is_int)
+        # gpu is optional: absent or null lets the server pick the card.
+        gpu = None if d.get("gpu") is None else _field(d, "gpu", _is_int)
         # VRAM is optional: absent or null books the whole card.
         vram_gib = None if d.get("vram_gib") is None else _field(d, "vram_gib", _is_gib)
-        start = parse_time(_field(d, "start", lambda v: isinstance(v, str)))
-        end = parse_time(_field(d, "end", lambda v: isinstance(v, str)))
+        # start is optional: absent means "the earliest slot that fits".
+        start = None if d.get("start") is None else parse_time(d["start"])
+        end = None if d.get("end") is None else parse_time(d["end"])
+        not_later_than = None if d.get("not_later_than") is None \
+            else parse_time(d["not_later_than"])
+        duration = None
+        if d.get("duration_minutes") is not None:
+            minutes = _field(d, "duration_minutes",
+                             lambda v: _is_int(v) and 1 <= v <= MAX_DURATION_MIN)
+            duration = timedelta(minutes=minutes)
         note = d.get("note")
         if note is not None and not isinstance(note, str):
             raise ClaimError(400, "missing or invalid field 'note'")
         priority = d.get("priority", "lendable")
         if not isinstance(priority, str):
             raise ClaimError(400, "priority must be lendable or important")
-        card_mib = self._card_mib(gpu)
+        auto_advance = d.get("auto_advance", False)
+        if not isinstance(auto_advance, bool):
+            raise ClaimError(400, "auto_advance must be true or false")
+        count = d.get("count", 1)
+        if not _is_int(count) or not 1 <= count <= GPU_COUNT:
+            raise ClaimError(400, f"count must be a whole number of GPUs, 1..{GPU_COUNT}")
+        notice = d.get("notice_seconds")
+        if notice is not None and (not _is_int(notice) or notice < 0):
+            raise ClaimError(400,
+                             "notice_seconds must be a whole number of seconds, 0 or more")
+        cards = self._cards()
+        card_mib = cards.get(gpu, DEFAULT_CARD_MIB) if gpu is not None \
+            else max(cards.values(), default=DEFAULT_CARD_MIB)
         vram_mib = card_mib if vram_gib is None else round(vram_gib * MIB_PER_GIB)
-        return self._store().create(user=user, gpu=gpu, vram_mib=vram_mib,
-                                    start=start, end=end, note=note,
+        return self._store().create(user=user, gpu=gpu, vram_mib=vram_mib, start=start,
+                                    end=end, duration=duration, note=note,
                                     ip=self.client_address[0], now=self.server.clock(),
                                     card_mib=card_mib, priority=priority,
-                                    grace=self._grace())
+                                    grace=self._grace(), auto_advance=auto_advance,
+                                    not_later_than=not_later_than, count=count,
+                                    cards=cards, max_pending=self._max_pending(),
+                                    notice_seconds=notice,
+                                    # Whether a victim is actually listening right now: a
+                                    # declared notice counts only while its watcher is
+                                    # parked, so a crashed job cannot hand its card away
+                                    # instantly on a promise nobody is left to keep.
+                                    watching=self.server.watchers.attached)
+
+    def _cards(self) -> dict[int, int]:
+        """Each GPU's total MiB from the latest poll; the default card size for every GPU
+        if the history has never seen one. One query instead of eight, because assignment
+        needs them all. t14 answers {0: 16376}; carrot answers eight entries."""
+        cards: dict[int, int] = {}
+        try:
+            conn = self._conn()
+            try:
+                for gpu, total in conn.execute(
+                        "SELECT gpu, total_mib FROM gpu_samples "
+                        "WHERE ts = (SELECT MAX(ts) FROM polls)"):
+                    if 0 <= gpu < GPU_COUNT and total:
+                        cards[gpu] = total
+            finally:
+                conn.close()
+        except (NoHistory, sqlite3.Error):
+            pass
+        return cards or {g: DEFAULT_CARD_MIB for g in range(GPU_COUNT)}
+
+    def _release(self, claim_id: int, d: dict):
+        """Truncate a booking that is under way, or cancel one that has not started."""
+        if set(d) - {"end"}:
+            raise ClaimError(400, "unknown field")
+        raw = d.get("end")
+        if raw is not None and not isinstance(raw, str):
+            raise ClaimError(400, "missing or invalid field 'end'")
+        end = None if raw in (None, "now") else parse_time(raw)
+        return self._store().release(claim_id, end=end, ip=self.client_address[0],
+                                     now=self.server.clock(), cards=self._cards())
+
+    def _capacity(self, query: str) -> None:
+        """The one authoritative capacity answer: what fits now, and when this shape fits.
+        It exists because clients were re-implementing the VRAM sum and getting it wrong."""
+        from resourcemonitor.slots import booked_at, earliest_fit_group
+        p = _params(query, {"gpu", "vram_gib", "duration_minutes", "count"})
+        cards = self._cards()
+        gpu = None
+        if "gpu" in p:
+            if not (p["gpu"].isascii() and p["gpu"].isdigit()) \
+                    or int(p["gpu"]) not in cards:
+                raise ClaimError(400, "GPU must be 0–7")
+            gpu = int(p["gpu"])
+        try:
+            vram_gib = float(p.get("vram_gib", "1"))
+            minutes = int(p.get("duration_minutes", "60"))
+            count = int(p.get("count", "1"))
+        except ValueError:
+            raise ClaimError(400, "invalid query")
+        if not (math.isfinite(vram_gib) and vram_gib > 0) or not 1 <= minutes \
+                <= MAX_DURATION_MIN or not 1 <= count <= GPU_COUNT:
+            raise ClaimError(400, "invalid query")
+        vram_mib = round(vram_gib * MIB_PER_GIB)
+        now = self.server.clock()
+        rows = list_window_ro(self.server.claims_path, now)
+        live = [b for b in rows if b.cancelled_at is None and b.end > now]
+        hit = earliest_fit_group(live, count, vram_mib, timedelta(minutes=minutes), cards,
+                                 now, gpus=None if gpu is None else [gpu])
+        want = cards if gpu is None else {gpu: cards[gpu]}
+        free = max((mib - booked_at(live, g, now) for g, mib in want.items()), default=0)
+        self._json(200, {"free_mib": max(free, 0),
+                         "free_gib": round(max(free, 0) / MIB_PER_GIB, 1),
+                         "earliest": None if hit is None else hit[0].isoformat(),
+                         "gpu": None if hit is None else hit[1][0],
+                         "gpus": [] if hit is None else hit[1]})
+
+    def _max_pending(self) -> int:
+        """booking.max_pending_per_user from policy.toml; the default if the file is
+        missing or bad. Without it, 13,000 jobs booking at once own the calendar for a
+        fortnight and the 80 GiB request is offered a slot in two weeks."""
+        try:
+            return load_policy(self.server.policy_path).max_pending_per_user
+        except Exception:
+            return 16
 
     def _grace(self) -> timedelta:
         """booking.grace_minutes from policy.toml; the default if the file is missing or bad."""
@@ -485,8 +704,12 @@ class _Server(ThreadingHTTPServer):
     store: ClaimsStore | None = None
     store_lock: threading.Lock
     host_name: str
+    watchers: Watchers
 
     def server_close(self) -> None:
+        # Before super(), so no request is still parked when the socket closes: a held
+        # long-poll must never delay the restart a deploy performs by hand.
+        self.watchers.shutdown()
         super().server_close()
         with self.store_lock:
             if self.store is not None:
@@ -507,6 +730,12 @@ def make_server(bind: str, port: int, history_path: Path, policy_path: Path,
     srv.claims_path = Path(claims_path)
     srv.users = users if users is not None else PwdUsers()
     srv.store_lock = threading.Lock()                # the store itself opens on the first write
+    try:
+        cap = load_policy(Path(policy_path)).max_watchers
+    except Exception:
+        cap = 64
+    # A thread budget, not a policy decision: changing it needs a restart, like the port.
+    srv.watchers = Watchers(max_watchers=cap)
     srv.host_name = socket.gethostname().split(".")[0]   # carrot.internal -> carrot
     return srv
 

@@ -24,7 +24,7 @@ SECURITY_STATUSES = (201, 400, 403, 409, 413, 415, 429)
 def _booking(**over):
     d = {"user": "dorian.zwanzig", "gpu": 4, "vram_gib": 40, "start": S, "end": E}
     d.update(over)
-    return d
+    return {k: v for k, v in d.items() if v is not None}
 
 
 @pytest.fixture(scope="module")
@@ -108,7 +108,7 @@ def test_bad_bookings_get_a_specific_400(live, payload, status, detail):
     (_booking(vram_gib="40"), "missing or invalid field 'vram_gib'"),
     (_booking(vram_gib=1e308), "missing or invalid field 'vram_gib'"),
     (_booking(vram_gib=10**309), "missing or invalid field 'vram_gib'"),
-    (_booking(end=None), "missing or invalid field 'end'"),
+    (_booking(end=None), "give exactly one of end and duration"),
     (_booking(note=5), "missing or invalid field 'note'"),
     (_booking(gpu=9), "GPU must be 0–7"),
     (_booking(user="<script>"), "invalid user name"),
@@ -243,8 +243,8 @@ def test_missing_content_length_is_413(live):
         conn.close()
 
 
-def test_rate_limit_is_429_after_30_writes(live, monkeypatch):
-    assert web._RateLimiter().limit == 30 and web._RateLimiter().window_s == 3600
+def test_rate_limit_is_429_once_the_budget_is_spent(live, monkeypatch):
+    assert web._RateLimiter().limit == 3600 and web._RateLimiter().window_s == 3600
     monkeypatch.setattr(web, "_WRITES", web._RateLimiter(limit=2))
     assert _post(live + "/api/claims", _booking(gpu=1))[0] == 201
     assert _post(live + "/api/claims", _booking(gpu=2))[0] == 201
@@ -499,7 +499,8 @@ def test_priority_defaults_to_lendable_and_rejects_other_values(live):
     assert s == 201 and json.loads(body)["claim"]["priority"] == "lendable"
     assert json.loads(body)["takes"] == [] and json.loads(body)["adjusted_start"] is None
     for bad in ("urgent", 1, None):
-        s, _, body = _post(live + "/api/claims", _booking(priority=bad, gpu=5))
+        s, _, body = _post(live + "/api/claims",
+                           {**_booking(gpu=5), "priority": bad})
         assert (s, json.loads(body)["detail"]) == (400, "priority must be lendable or important")
 
 
@@ -547,3 +548,189 @@ def test_now_reports_effective_shares_and_taken_segments(live):
 def test_now_names_the_host_by_its_short_name(live):
     import socket
     assert _get(live + "/api/now")["host"] == socket.gethostname().split(".")[0]
+
+
+def test_a_booking_without_a_start_is_assigned_and_says_so(live):
+    status, _, body = _post(live + "/api/claims",
+                            _booking(start=None, end=None, duration_minutes=60))
+    assert status == 201
+    d = json.loads(body)
+    assert d["claim"]["start"] is not None
+    assert d["assigned_later"] is False
+    assert d["claims"] == [d["claim"]]
+
+
+def test_an_assigned_booking_lands_after_a_blocker(live):
+    blocker = json.loads(_post(live + "/api/claims",
+                               _booking(vram_gib=79, start=S, end=E))[2])["claim"]
+    status, _, body = _post(live + "/api/claims",
+                            _booking(user="cwinkelmann", vram_gib=79, start=None, end=None,
+                                     duration_minutes=60))
+    assert status == 201
+    d = json.loads(body)
+    assert d["assigned_later"] is True
+    assert d["claim"]["start"] == blocker["end"]
+
+
+def test_a_group_booking_returns_every_member(live):
+    status, _, body = _post(live + "/api/claims",
+                            _booking(gpu=None, count=4, vram_gib=20, start=None, end=None,
+                                     duration_minutes=60))
+    assert status == 201
+    d = json.loads(body)
+    assert len(d["claims"]) == 4
+    assert len({c["group_id"] for c in d["claims"]}) == 1
+
+
+def test_a_conflict_carries_the_earliest_offer(live):
+    _post(live + "/api/claims", _booking(vram_gib=79, start=S, end=E))
+    status, _, body = _post(live + "/api/claims",
+                            _booking(user="cwinkelmann", vram_gib=79, start=S, end=E))
+    assert status == 409
+    d = json.loads(body)
+    assert d["error"] == "conflict"
+    assert "earliest" in d and "free_now" in d
+
+
+@pytest.mark.parametrize("minutes", [0, -5, 1.5, True, "60", 14 * 24 * 60 + 1])
+def test_a_bad_duration_is_rejected_before_any_capacity_scan(live, minutes):
+    status, _, body = _post(live + "/api/claims",
+                            _booking(start=None, end=None, duration_minutes=minutes))
+    assert status == 400
+    assert json.loads(body)["error"] == "invalid"
+
+
+def test_giving_both_end_and_duration_is_rejected(live):
+    status, _, _ = _post(live + "/api/claims",
+                         _booking(start=S, end=E, duration_minutes=60))
+    assert status == 400
+
+
+def test_auto_advance_and_notice_seconds_round_trip(live):
+    status, _, body = _post(live + "/api/claims",
+                            _booking(start=None, end=None, duration_minutes=60,
+                                     auto_advance=True, notice_seconds=0))
+    assert status == 201
+    claim = json.loads(body)["claim"]
+    assert claim["auto_advance"] is True
+    assert claim["notice_seconds"] == 0
+
+
+@pytest.mark.parametrize("field,value", [("auto_advance", "yes"), ("count", 0),
+                                         ("count", 99), ("notice_seconds", -1),
+                                         ("notice_seconds", "0"), ("gpu", 99)])
+def test_malformed_new_fields_are_400_not_500(live, field, value):
+    body = _booking(start=None, end=None, duration_minutes=60)
+    body[field] = value
+    status, _, _ = _post(live + "/api/claims", body)
+    assert status == 400
+
+
+def test_an_unknown_field_is_still_rejected(live):
+    status, _, _ = _post(live + "/api/claims",
+                         dict(_booking(), surprise=1))
+    assert status == 400
+
+
+def _get_status(url):
+    """Like _post, but a GET: the status matters as much as the body here."""
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def _claim_id(live, **over):
+    return json.loads(_post(live + "/api/claims", _booking(**over))[2])["claim"]["id"]
+
+
+def test_release_truncates_and_reports_nothing_advanced(live):
+    cid = _claim_id(live, start=None, end=None, duration_minutes=240, vram_gib=79)
+    status, _, body = _post(f"{live}/api/claims/{cid}/release", {})
+    assert status == 200
+    d = json.loads(body)
+    assert d["claim"]["cancelled_at"] is None
+    assert d["advanced"] == []
+
+
+def test_release_reports_the_slot_it_pulled_earlier(live):
+    blocker = _claim_id(live, start=None, end=None, duration_minutes=240, vram_gib=79)
+    waiting = json.loads(_post(live + "/api/claims", _booking(
+        user="cwinkelmann", gpu=4, vram_gib=79, start=None, end=None,
+        duration_minutes=60, auto_advance=True))[2])["claim"]
+    status, _, body = _post(f"{live}/api/claims/{blocker}/release", {})
+    assert status == 200
+    advanced = json.loads(body)["advanced"]
+    assert [a["id"] for a in advanced] == [waiting["id"]]
+    assert advanced[0]["new_start"] < waiting["start"]
+
+
+def test_release_accepts_an_explicit_end(live):
+    cid = _claim_id(live, start=S, end=E)
+    status, _, body = _post(f"{live}/api/claims/{cid}/release",
+                            {"end": "2026-10-06T15:00:00+02:00"})
+    assert status == 200
+    assert json.loads(body)["claim"]["end"] == "2026-10-06T13:00:00+00:00"
+
+
+def test_releasing_an_unknown_booking_is_404(live):
+    status, _, _ = _post(f"{live}/api/claims/999999/release", {})
+    assert status == 404
+
+
+def test_release_rejects_an_unknown_field(live):
+    cid = _claim_id(live, start=S, end=E)
+    status, _, _ = _post(f"{live}/api/claims/{cid}/release", {"when": "now"})
+    assert status == 400
+
+
+def test_release_is_a_post_only_route(live):
+    cid = _claim_id(live, start=S, end=E)
+    status, _, _ = _get_status(f"{live}/api/claims/{cid}/release")
+    assert status in (404, 405)
+
+
+def test_capacity_answers_free_now_and_the_earliest_fit(live):
+    _post(live + "/api/claims", _booking(vram_gib=79, start=S, end=E))
+    status, _, body = _get_status(live + "/api/capacity?gpu=4&vram_gib=79&duration_minutes=60")
+    assert status == 200
+    d = json.loads(body)
+    assert d["gpu"] == 4
+    assert d["free_mib"] < 79 * 1024
+    assert d["earliest"] is not None
+
+
+def test_capacity_without_a_gpu_considers_every_card(live):
+    status, _, body = _get_status(live + "/api/capacity?vram_gib=20&duration_minutes=60")
+    assert status == 200
+    d = json.loads(body)
+    assert d["gpu"] is not None
+    assert d["earliest"] is not None
+
+
+def test_capacity_rejects_rubbish(live):
+    for q in ("?gpu=nine", "?vram_gib=-1", "?duration_minutes=0", "?count=99",
+              "?surprise=1"):
+        status, _, _ = _get_status(live + "/api/capacity" + q)
+        assert status == 400
+
+
+def test_the_pending_limit_answers_409_over_http(live, tmp_path):
+    # the live fixture's policy.toml is empty, so the default 16 applies; book 16 futures
+    _post(live + "/api/claims", _booking(vram_gib=79, start=S, end=E))
+    bodies = [_post(live + "/api/claims", _booking(user="cwinkelmann", vram_gib=79,
+                                                   start=None, end=None,
+                                                   duration_minutes=60))
+              for _ in range(17)]
+    assert bodies[-1][0] == 409
+    assert json.loads(bodies[-1][2])["max_pending_per_user"] == 16
+
+
+def test_capacity_rejects_a_non_ascii_digit_with_400_not_500(live):
+    """int('²') raises outside the guard, so isdigit() alone turns a typo into a 500 --
+    and '٣' would be accepted as 3. _hours() in this file already checks isascii()."""
+    for bad in ("%C2%B2", "%D9%A3"):           # percent-encoded: superscript two, Arabic-Indic three
+        status, _, _ = _get_status(live + "/api/capacity?gpu=" + bad)
+        assert status == 400, bad

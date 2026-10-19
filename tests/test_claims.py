@@ -4,8 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from resourcemonitor.claims import (ClaimError, ClaimsStore, list_window_ro, load_active,
-                                     next_reset, parse_time)
+from resourcemonitor.claims import (SCHEMA_VERSION, ClaimError, ClaimsStore,
+                                     list_window_ro, load_active, next_reset,
+                                     parse_time)
 from tests.claims_fixture import FakeUsers, T0, book
 
 
@@ -352,8 +353,9 @@ def test_opening_a_version_1_file_migrates_it_to_the_current_version(tmp_path):
         s.close()
     conn = sqlite3.connect(path)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
-    assert {"kind", "priority"} <= set(cols)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert {"kind", "priority", "auto_advance", "group_id",
+            "notice_seconds"} <= set(cols)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     conn.close()
     ClaimsStore(path, users=FakeUsers()).close()                    # reopening is a no-op
 
@@ -362,7 +364,7 @@ def test_new_files_are_created_at_the_current_version_with_kind(tmp_path):
     ClaimsStore(tmp_path / "n.sqlite", users=FakeUsers()).close()
     conn = sqlite3.connect(tmp_path / "n.sqlite")
     assert "kind" in [r[1] for r in conn.execute("PRAGMA table_info(claims)")]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     conn.close()
 
 
@@ -380,3 +382,71 @@ def test_quick_hold_conflict_shows_the_clipped_end_in_berlin_time(store):
     status, detail = _err(lambda: book(store, user="andre.kliem", gpu=3, gib=10, hours=1))
     assert (status, detail) == (409, "GPU 3 is held by dorian.zwanzig until 16:00 "
                                      "(quick booking) — set its holder to free first")
+
+
+_V3_SCHEMA = """
+CREATE TABLE claims (
+  id INTEGER PRIMARY KEY, user TEXT NOT NULL, gpu INTEGER NOT NULL,
+  vram_mib INTEGER NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, note TEXT,
+  created_at TEXT NOT NULL, created_ip TEXT NOT NULL, cancelled_at TEXT,
+  cancelled_ip TEXT, kind TEXT NOT NULL DEFAULT 'calendar',
+  priority TEXT NOT NULL DEFAULT 'important');
+PRAGMA user_version = 3;
+"""
+
+
+def _write_v3(path):
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_V3_SCHEMA)
+    conn.execute("INSERT INTO claims (user, gpu, vram_mib, start, end, created_at, "
+                 "created_ip, priority) VALUES ('dorian.zwanzig', 4, 40960, "
+                 "'2026-10-06T12:00:00+00:00', '2026-10-06T16:00:00+00:00', "
+                 "'2026-10-06T11:00:00+00:00', '10.0.0.1', 'lendable')")
+    conn.commit()
+    conn.close()
+
+
+def test_schema_version_is_four():
+    assert SCHEMA_VERSION == 4
+
+
+def test_a_v3_file_migrates_and_keeps_every_row(tmp_path):
+    path = tmp_path / "claims.sqlite"
+    _write_v3(path)
+    store = ClaimsStore(path, users=FakeUsers())
+    try:
+        got = store.get(1)
+        assert got is not None
+        assert got.user == "dorian.zwanzig" and got.priority == "lendable"
+        assert got.auto_advance is False
+        assert got.group_id is None
+        assert got.notice_seconds is None
+        conn = sqlite3.connect(str(path))
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        conn.close()
+    finally:
+        store.close()
+
+
+def test_migrating_twice_is_harmless(tmp_path):
+    path = tmp_path / "claims.sqlite"
+    _write_v3(path)
+    for _ in range(2):
+        store = ClaimsStore(path, users=FakeUsers())
+        store.close()
+    store = ClaimsStore(path, users=FakeUsers())
+    try:
+        assert store.get(1) is not None
+    finally:
+        store.close()
+
+
+def test_new_columns_appear_in_json(tmp_path):
+    store = ClaimsStore(tmp_path / "c.sqlite", users=FakeUsers())
+    try:
+        d = book(store).to_json()
+        assert d["auto_advance"] is False
+        assert d["group_id"] is None
+        assert d["notice_seconds"] is None
+    finally:
+        store.close()

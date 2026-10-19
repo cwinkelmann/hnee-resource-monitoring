@@ -1,0 +1,35 @@
+# deploy/resourcemonitor-dry.service  ->  ~/.config/systemd/user/
+#
+# The collector without Slack: it writes history, energy and VRAM samples and
+# evaluates the alert rules, but posts nothing. This is the unit to run until the
+# webhook is in place, and the one staging (olive) runs permanently.
+#
+# Going live is a swap, not an edit: disable this unit and enable
+# resourcemonitor.service once ~/.config/resourcemonitor/env holds the webhook.
+# Never run both — two collectors double every energy sample.
+[Unit]
+Description=GPU resource monitor (read-only; writes history, never posts)
+After=network-online.target
+
+[Service]
+Type=simple
+# Needs Linger=yes for this user, or it will not start at boot. Carrot has it
+# (set by an admin). Enabling it needs root, and there is no sudo on carrot or
+# olive and never will be -- so on a host with Linger=no this unit cannot be
+# used at all: run deploy/resourcemonitor-guard.sh from cron instead.
+Environment=PYTHONUNBUFFERED=1
+# Deliberately no webhook env file: without SLACK_WEBHOOK_URL there is nothing to
+# leak, and the posting flag is absent below, so nothing is sent even if the
+# variable is set in the environment some other way.
+ExecStart=%h/ResourceMonitor/deploy/run-resourcemonitor.sh watch
+WorkingDirectory=%h/ResourceMonitor
+Restart=always
+RestartSec=30
+# Deliberately NOT set: ProtectSystem, ProtectHome, PrivateTmp. In a user unit they
+# imply PrivateUsers=yes, a user namespace that rewrites every foreign UID in /proc
+# to 65534, which destroys the per-user attribution this tool exists for (and
+# ProtectHome=read-only would make the state directory unwritable).
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

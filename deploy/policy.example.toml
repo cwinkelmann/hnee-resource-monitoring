@@ -23,3 +23,12 @@ channel    = "#gpu-watch"
 # An important booking that would squeeze a lendable booking already under way starts
 # no earlier than this many minutes from when it is made.
 grace_minutes = 30
+
+# A user may hold at most this many bookings that have not started yet. It counts rows, so
+# a 4-GPU group costs 4. Without it, a 13,000-job pipeline books the whole calendar and a
+# colleague who needs 80 GiB is offered a slot a fortnight out.
+max_pending_per_user = 16
+
+# Parked GET /api/claims/<id>/events connections. Only *running* jobs watch, so this is
+# about twice carrot's 32 concurrent slots. Past it the route answers 503 and clients poll.
+max_watchers = 64

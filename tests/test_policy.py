@@ -55,3 +55,24 @@ def test_unknown_gpu_index_is_rejected(tmp_path):
 def test_missing_section_names_the_section(tmp_path):
     with pytest.raises(ValueError, match="rules"):
         load_policy(_write(tmp_path, '[assignments]\n"a" = [0]\n[notify]\ncooldown_s = 1\nchannel = "#c"\n'))
+
+
+def test_max_pending_and_max_watchers_default_when_absent(tmp_path):
+    pol = load_policy(_write(tmp_path, GOOD))
+    assert pol.max_pending_per_user == 16
+    assert pol.max_watchers == 64
+
+
+def test_max_pending_is_read_from_the_booking_section(tmp_path):
+    pol = load_policy(_write(tmp_path, GOOD + "[booking]\nmax_pending_per_user = 4\n"
+                                              "max_watchers = 8\n"))
+    assert pol.max_pending_per_user == 4
+    assert pol.max_watchers == 8
+
+
+@pytest.mark.parametrize("line", ["max_pending_per_user = 0", "max_pending_per_user = -1",
+                                  'max_pending_per_user = "many"', "max_watchers = 0",
+                                  "max_watchers = 100000"])
+def test_bad_booking_limits_are_caught_at_load_time(tmp_path, line):
+    with pytest.raises(ValueError):
+        load_policy(_write(tmp_path, GOOD + f"[booking]\n{line}\n"))

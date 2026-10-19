@@ -246,3 +246,80 @@ def test_cpu_ram_formatting_helpers():
                          timeout=30)
     assert out.returncode == 0, out.stderr
     assert "ok" in out.stdout
+
+
+def _node_top_level(name, call):
+    """Extract a column-0 helper from app.js and evaluate `call` with node (skip without).
+    Mirrors the existing extractor for the indented helpers."""
+    import json, shutil, subprocess
+    js = (WEB / "app.js").read_text()
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    m = re.search(r"^function " + name + r"\(.*?^\}$", js, re.S | re.M)
+    assert m is not None, name
+    out = subprocess.run([node, "-e", m.group(0) + "\nconsole.log(JSON.stringify("
+                          + call + "));"], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_booking_state_names_the_four_states():
+    now = 1000000
+    assert _node_top_level("bookingState",
+                           "bookingState({cancelled_at:'x',start:'',end:''}, 0)") \
+        == "cancelled"
+    assert _node_top_level(
+        "bookingState",
+        f"bookingState({{cancelled_at:null,start:new Date({now - 2000}).toISOString(),"
+        f"end:new Date({now - 1000}).toISOString()}}, {now})") == "over"
+    assert _node_top_level(
+        "bookingState",
+        f"bookingState({{cancelled_at:null,start:new Date({now - 1000}).toISOString(),"
+        f"end:new Date({now + 1000}).toISOString()}}, {now})") == "running"
+    assert _node_top_level(
+        "bookingState",
+        f"bookingState({{cancelled_at:null,start:new Date({now + 1000}).toISOString(),"
+        f"end:new Date({now + 2000}).toISOString()}}, {now})") == "assigned"
+
+
+def test_the_form_can_ask_for_the_earliest_slot():
+    html = (WEB / "index.html").read_text()
+    for id_ in ("book-earliest", "book-duration", "book-advance"):
+        assert f'id="{id_}"' in html, id_
+
+
+def test_the_page_still_has_no_inline_script_or_external_url():
+    html = (WEB / "index.html").read_text()
+    assert re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html) is None
+    assert " style=" not in html
+    for f in ("index.html", "app.js", "app.css"):
+        assert re.search(r"https?://", (WEB / f).read_text()) is None, f
+
+
+def test_the_bookings_calendar_has_a_range_picker_defaulting_to_24_h():
+    html = (WEB / "index.html").read_text()
+    assert 'id="booking-range"' in html
+    # the same shape as the timeline's picker, and 24 h is the one that starts active
+    assert re.search(r'data-hours="24"[^>]*class="active"', html)
+    for hours in ("24", "168", "336"):
+        assert 'data-hours="%s"' % hours in html, hours
+    assert "Next 14 days" not in html          # the picker says the range now
+
+
+def test_calendar_ticks_are_hours_inside_a_day_and_days_beyond_it():
+    t0 = 1760000000000          # a fixed instant, local midnight-independent
+    short = _node_top_level("calendarTicks", "calendarTicks(%d, 24)" % t0)
+    assert 4 <= len(short) <= 12
+    assert all(":" in tick["label"] for tick in short)
+    long = _node_top_level("calendarTicks", "calendarTicks(%d, 336)" % t0)
+    assert 10 <= len(long) <= 16
+    assert all(":" not in tick["label"] for tick in long)
+
+
+def test_calendar_ticks_stay_inside_the_window():
+    t0 = 1760000000000
+    for hours in (24, 168, 336):
+        ticks = _node_top_level("calendarTicks", "calendarTicks(%d, %d)" % (t0, hours))
+        assert all(t0 <= tick["t"] <= t0 + hours * 3600 * 1000 for tick in ticks)
+        assert [tick["t"] for tick in ticks] == sorted(tick["t"] for tick in ticks)
